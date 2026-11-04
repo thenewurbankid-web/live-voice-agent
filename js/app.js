@@ -13,6 +13,12 @@ import { PlansStore } from './plans-store.js';
 import { PlanUI } from './plan-ui.js';
 import { webSearch, needsWeb } from './web.js';
 import { Memory } from './memory.js';
+import { Sounds, describeSounds } from './sounds.js';
+import { Aware } from './aware.js';
+import { GraphMemory } from './graph-memory.js';
+const graph = new GraphMemory();
+await graph.load().catch(() => { graph.events = []; graph.index = new Map(); graph.byId = new Map(); });
+let sounds = null, aware = null, soundBefore = null, lastSpeechAt = 0, recorder = null;
 const memory = new Memory();
 await memory.load().catch(() => { memory.facts = []; memory.turns = []; });
 let lastAudio = null;
@@ -51,6 +57,8 @@ $('mode').value = store.get('mode', 'chat');
 $('useCam').checked = store.get('useCam', true);
 $('bargeIn').checked = store.get('bargeIn', true);
 $('useWeb').checked = store.get('useWeb', true);
+$('useAware').checked = store.get('useAware', true);
+$('useRec').checked = store.get('useRec', false);
 const syncMode = () => { $('brain').closest('label').classList.toggle('hidden', $('mode').value !== 'chat'); };
 $('mode').onchange = syncMode; syncMode();
 
@@ -105,6 +113,7 @@ function caption(kind, text) {
 function logLine(who, text, extra = {}) {
   history.push({ who, text });
   memory.addTurn(who, text, extra).catch(() => {});
+  graph.add(who === 'You' ? 'said' : 'reply', text).catch(() => {});
   const p = document.createElement('p'); p.innerHTML = `<b>${who}:</b> `; p.append(text);
   $('log').append(p);
 }
@@ -118,6 +127,8 @@ function interrupt() {
 
 function onSpeechStart() {
   if (!micOn) return;
+  lastSpeechAt = Date.now();
+  soundBefore = sounds?.snapshot(3) || null;   // the sound just before the user spoke ("can you hear that?")
   if ((state === 'speaking' || state === 'thinking') && bargeIn) { interrupt(); setState('listening'); }
 }
 
@@ -166,11 +177,12 @@ function cutPoint(s, first) {
 }
 
 async function respond(text, my) {
+  const graphCtx = graph.contextFor(text).catch(() => '');
   caption('you', text);
   logLine('You', text, { image: eyes?.enabled ? eyes.snapshot(448) : null, audio: lastAudio });
   lastAudio = null;
   if (await handleIntent(text, my)) return;
-  const mem = memory.context();
+  const mem = [memory.context(), await graphCtx].filter(Boolean).join('\n');
   if (mem) text += '\n\n(' + mem + ')';
   if (my !== turn) return;
   if (getOnline() && needsWeb(text)) {
@@ -299,6 +311,16 @@ async function handleIntent(text, my) {
     voice.drain().then(() => { if (my === turn) setState('listening'); });
     return true;
   }
+  // H) hearing: name the ambient sound
+  if (/\b(can you hear|do you hear|what do you hear|hear (that|this)|what('?s| is) (that|this) (sound|noise)|what sound)\b/.test(t)) {
+    if (!sounds?.clf) { say("My sound recognizer isn't loaded on this device, but I can hear your voice.", my); return true; }
+    let found = describeSounds(sounds.classify(soundBefore));
+    if (!found) { caption('agent', 'Listening…'); setState('looking'); found = describeSounds(await sounds.listen(3)); }
+    if (my !== turn) return true;
+    if (found) graph.add('heard', found).catch(() => {});
+    say(found ? `I can hear ${found}.` : "I don't hear anything besides your voice right now.", my);
+    return true;
+  }
   // 0) persistent memory
   const rem = text.match(/^\s*(?:please\s+)?remember(?:\s+that)?\s+(.{3,})$/i);
   if (rem) { await memory.remember(rem[1].replace(/[.!]+$/, '')); say("Okay, I'll remember that.", my); return true; }
@@ -314,7 +336,7 @@ async function handleIntent(text, my) {
       : past > 1 ? `We've talked ${past} times, but you haven't told me about yourself yet. Tell me your name and I'll remember it.` : "Not yet. Tell me your name and what you like, and I'll remember it on this device.", my);
     return true;
   }
-  if (/\bforget (everything|all)\b/.test(t)) { await memory.forgetAll(); if (brain) brain.history = []; say('Done. I forgot everything.', my); return true; }
+  if (/\bforget (everything|all)\b/.test(t)) { await memory.forgetAll(); await graph.clear(); if (brain) brain.history = []; say('Done. I forgot everything.', my); return true; }
   // 2) "I'm here / done / next" → finish current stop, guide to the next one
   if (/\b(i'?m here|we'?re here|arrived|done here|next place|move on|let'?s go on)\b/.test(t)) {
     const active = await plans.active() || (await plans.list())[0];
@@ -383,6 +405,43 @@ function say(text, my) {
   voice.drain().then(() => { if (my === turn) setState('listening'); });
 }
 
+// ---------- aware mode: proactive seeing + hearing ----------
+const canSpeak = () => state === 'listening' && micOn && Date.now() - lastSpeechAt > 4000;
+function startAware() {
+  if (eyes?.captionerReady) {
+    aware = new Aware({
+      eyes, canSpeak,
+      onRemark: ({ text, scene }) => { graph.add('saw', scene).catch(() => {}); say(text, ++turn); },
+    });
+    aware.start();
+  }
+  // sounds: every 6 s, note strong non-speech sounds; mention a new one at most every 45 s
+  let lastSound = '', lastSoundSay = 0;
+  setInterval(() => {
+    if (!sounds?.clf || state !== 'listening' || Date.now() - lastSpeechAt < 4000) return;
+    const top = sounds.classify(sounds.snapshot(3)).filter((x) => x.score > 0.5)[0];
+    if (!top || top.name === lastSound) return;
+    lastSound = top.name;
+    graph.add('heard', top.name.toLowerCase()).catch(() => {});
+    if (canSpeak() && Date.now() - lastSoundSay > 45000) { lastSoundSay = Date.now(); say(`I can hear ${top.name.toLowerCase()}.`, ++turn); }
+  }, 6000);
+}
+
+// ---------- optional continuous video + audio recording into memory ----------
+function startRecording() {
+  try {
+    const tracks = [...(eyes?.stream?.getVideoTracks() || []), ...micStream.getAudioTracks()];
+    const mime = ['video/webm;codecs=vp8,opus', 'video/webm', 'video/mp4'].find((m) => MediaRecorder.isTypeSupported(m));
+    if (!mime) return;
+    const id = 'rec-' + Date.now();
+    recorder = new MediaRecorder(new MediaStream(tracks), { mimeType: mime, videoBitsPerSecond: 250000, audioBitsPerSecond: 32000 });
+    recorder.ondataavailable = (e) => { if (e.data?.size) memory.addChunk(id, e.data, mime).catch(() => {}); };
+    recorder.start(5000);
+    $('recPill').classList.remove('hidden');
+  } catch {}
+}
+function restartRecording() { if (recorder) { try { recorder.stop(); } catch {} recorder = null; startRecording(); } }
+
 // ---------- orb level meter ----------
 function meter() {
   const a = state === 'speaking' ? voice?.analyser : micAnalyser;
@@ -430,7 +489,7 @@ async function start() {
       brain = new Brain($('brain').value, profile);
       brain.history = memory.recentHistory();
       jobs.unshift(() => brain.load(progressRow(prog, 'Brain · ' + BRAINS.find((b) => b.key === $('brain').value)?.label)));
-      if (useCam && !brain.vision) {
+      if (useCam && (!brain.vision || $('useAware').checked)) {
         const row = progressRow(prog, 'Eyes · SmolVLM-256M');
         jobs.push(() => eyes.loadCaptioner(profile, row).then(() => { eyes.captionerReady = true; }).catch(() => row(1, 'skipped (not supported here)')));
       }
@@ -444,6 +503,11 @@ async function start() {
         jobs.push(() => ocr.load(row).catch(() => { ocr = null; row(1, 'skipped'); }));
       }
       if (mode === 'en-te') jobs.push(() => translator.loadTelugu(progressRow(prog, 'Translator · NLLB-200 en→te')));
+    }
+    if (mode === 'chat') {
+      const row = progressRow(prog, 'Hearing · YAMNet sound recognizer');
+      sounds = new Sounds();
+      jobs.push(() => sounds.load(audioCtx, micStream, row).catch(() => { sounds = null; row(1, 'skipped'); }));
     }
     // Phones: load one model at a time to keep memory peaks low. Desktop: in parallel.
     if (profile.mobile) { for (const j of jobs) await j(); } else await Promise.all(jobs.map((j) => j()));
@@ -464,6 +528,9 @@ async function enterCall() {
   if (mode === 'en-te' && !voice.hasVoice('te-IN')) caption('tr', 'No Telugu voice on this device: translations are shown as text.');
   $('typeIn').placeholder = { 'de-en': 'Deutsch eingeben…', 'te-en': 'తెలుగులో టైప్ చేయండి…' }[mode] || 'Type a message…';
   $('seeBtn').classList.toggle('hidden', mode !== 'de-en');
+  store.set('useAware', $('useAware').checked); store.set('useRec', $('useRec').checked);
+  if (mode === 'chat' && $('useAware').checked) startAware();
+  if ($('useRec').checked) startRecording();
   $('webBtn').classList.toggle('on', webOn); $('webBtn').classList.toggle('off', !webOn);
   try { await navigator.wakeLock?.request('screen'); } catch {}
   await ears.start();
@@ -503,7 +570,7 @@ $('seeBtn').onclick = async () => {
   if (my === turn && en) return speakTranslation(en, my);
   setState('listening');
 };
-$('flipBtn').onclick = () => eyes?.flip().catch(() => {});
+$('flipBtn').onclick = () => eyes?.flip().then(restartRecording).catch(() => {});
 $('planBtn').onclick = () => openPlans('active').catch((e) => caption('agent', 'Planner unavailable: ' + e.message));
 $('openPlan').onclick = () => openPlans('new').catch((e) => { $('err').textContent = 'Planner unavailable: ' + e.message; $('err').classList.remove('hidden'); });
 $('webBtn').onclick = () => { webOn = !webOn; store.set('useWeb', webOn); $('webBtn').classList.toggle('on', webOn); $('webBtn').classList.toggle('off', !webOn); caption('tr', webOn ? 'Web access on' : 'Offline only'); };
@@ -512,6 +579,24 @@ $('logBtn').onclick = () => {
   const top = document.createElement('p');
   top.innerHTML = `<b>Memory:</b> ${memory.facts.length} facts · ${memory.turns.length} messages, stored on this device. Say "forget everything" to clear.`;
   log.append(top);
+  const tl = document.createElement('p');
+  tl.innerHTML = '<b>Timeline (said · saw · heard):</b>';
+  log.append(tl);
+  for (const e of graph.timeline(40)) {
+    const q = document.createElement('p'); q.style.fontSize = '13px';
+    q.innerHTML = `<b>${new Date(e.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} · ${e.kind}</b> `;
+    q.append(e.text.slice(0, 160)); log.append(q);
+  }
+  memory.recordings().then((recs) => {
+    if (!recs.length) return;
+    const h = document.createElement('p'); h.innerHTML = '<b>Recordings:</b>'; log.prepend(h);
+    for (const r of recs.slice(0, 10)) {
+      const b = document.createElement('button'); b.className = 'ghost';
+      b.textContent = `▶ ${new Date(r.start).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' })} · ${(r.bytes / 1e6).toFixed(1)} MB`;
+      b.onclick = async () => { const blob = await memory.recording(r.id); if (!blob) return; const v = document.createElement('video'); v.controls = true; v.playsInline = true; v.style.width = '100%'; v.src = URL.createObjectURL(blob); b.replaceWith(v); v.play().catch(() => {}); };
+      h.after(b);
+    }
+  }).catch(() => {});
   for (const t of memory.turns.slice(-60)) {
     const p = document.createElement('p');
     p.innerHTML = `<b>${new Date(t.at).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' })} · ${t.who}:</b> `;

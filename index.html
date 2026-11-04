@@ -110,6 +110,8 @@ form.type button{border:0;border-radius:99px;padding:0 16px;background:#ffffff1f
     <div class="toggle"><span>Camera (the AI can see)</span><input type="checkbox" id="useCam" checked></div>
     <div class="toggle"><span>Interrupt by talking</span><input type="checkbox" id="bargeIn" checked></div>
     <div class="toggle"><span>Web access (live search, places &amp; walking routes)</span><input type="checkbox" id="useWeb" checked></div>
+    <div class="toggle"><span>Aware mode (speaks up about what it sees &amp; hears)</span><input type="checkbox" id="useAware" checked></div>
+    <div class="toggle"><span>Record video + audio to memory (on device)</span><input type="checkbox" id="useRec"></div>
     <p class="note">First start downloads the models once (about 1–3 GB, Wi-Fi recommended). After that everything runs offline. Headphones give the best interruption.</p>
   </div>
   <button class="primary" id="start">Start</button>
@@ -125,6 +127,7 @@ form.type button{border:0;border-radius:99px;padding:0 16px;background:#ffffff1f
   <div class="shade"></div>
   <div class="top">
     <div class="pill"><span class="dot"></span><span id="status">Starting…</span></div>
+    <div class="pill hidden" id="recPill" style="color:#ff6b6b">● REC</div>
     <div class="pill" id="modelPill"></div>
   </div>
   <div class="stage"><button id="orb" aria-label="Tap to interrupt"></button></div>
