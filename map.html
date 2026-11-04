@@ -1,0 +1,14 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Berlin map test</title>
+<style>html,body{margin:0;height:100%}#map{position:absolute;inset:0}#msg{position:absolute;z-index:2;top:8px;left:8px;background:#fffc;padding:4px 8px;font:14px sans-serif}</style>
+<div id="msg">starting…</div><div id="map"></div>
+<script type="module">
+import { BerlinMap } from './js/map.js';
+const msg = document.getElementById('msg');
+const m = new BerlinMap(document.getElementById('map'));
+await m.ensureOffline((f, l) => msg.textContent = `${l} ${Math.round(f * 100)}%`);
+await m.show();
+msg.textContent = 'map ready';
+</script>

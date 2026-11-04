@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+<meta name="theme-color" content="#0b0d12">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="description" content="A live voice and video AI agent that runs entirely in your browser, offline after first load.">
+<title>Live Agent</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icon-192.png">
+<style>
+:root{--bg:#0b0d12;--panel:#151922;--ink:#f2f4f8;--mute:#9aa3b2;--line:#252b37;--accent:#7aa2ff;--accent2:#b18cff;--ok:#38d39f;--bad:#ff6b6b;
+  --safe-t:env(safe-area-inset-top,0px);--safe-b:env(safe-area-inset-bottom,0px)}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--ink);font:16px/1.4 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;overscroll-behavior:none}
+button,select,input{font:inherit;color:inherit}
+.hidden{display:none!important}
+/* ---------- setup ---------- */
+#setup{min-height:100dvh;display:flex;flex-direction:column;gap:18px;padding:calc(28px + var(--safe-t)) 16px calc(24px + var(--safe-b));max-width:520px;margin:0 auto}
+.brand{display:flex;align-items:center;gap:12px}
+.brand .mini{width:44px;height:44px;border-radius:50%;background:radial-gradient(circle at 35% 30%,#fff8,transparent 40%),conic-gradient(from 200deg,var(--accent),var(--accent2),#5ee1d5,var(--accent))}
+h1{font-size:26px;margin:0}
+.tag{color:var(--mute);margin:0}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:14px;display:flex;flex-direction:column;gap:12px}
+label.row{display:flex;flex-direction:column;gap:6px;font-size:14px;color:var(--mute)}
+select{background:#0f1218;border:1px solid var(--line);border-radius:12px;padding:12px;font-size:16px;width:100%}
+.toggle{display:flex;align-items:center;justify-content:space-between;gap:12px;font-size:15px}
+.toggle input{width:22px;height:22px;accent-color:var(--accent)}
+.chips{display:flex;flex-wrap:wrap;gap:6px}
+.chip{font-size:12px;padding:4px 9px;border-radius:99px;border:1px solid var(--line);color:var(--mute)}
+.chip.ok{color:var(--ok);border-color:color-mix(in srgb,var(--ok) 40%,transparent)}
+.chip.bad{color:var(--bad);border-color:color-mix(in srgb,var(--bad) 40%,transparent)}
+.primary{background:linear-gradient(135deg,var(--accent),var(--accent2));border:0;border-radius:14px;padding:16px;font-weight:600;font-size:17px;color:#0b0d12;cursor:pointer}
+.primary:disabled{opacity:.5}
+.ghost{background:transparent;border:1px solid var(--line);border-radius:14px;padding:12px;cursor:pointer}
+.note{font-size:13px;color:var(--mute);margin:0}
+.prog{display:flex;flex-direction:column;gap:10px}
+.prog .p{font-size:13px;color:var(--mute)}
+.prog .p b{color:var(--ink);font-weight:500}
+.prog .bar{height:6px;border-radius:99px;background:var(--line);overflow:hidden;margin-top:4px}
+.prog .bar i{display:block;height:100%;width:0;background:linear-gradient(90deg,var(--accent),var(--accent2));transition:width .25s}
+.err{color:var(--bad);font-size:14px;margin:0;white-space:pre-wrap}
+/* ---------- call ---------- */
+#call{position:fixed;inset:0;display:flex;flex-direction:column;background:#000;overflow:hidden}
+#cam{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;opacity:.92}
+#cam.mirror{transform:scaleX(-1)}
+#call.nocam #cam{opacity:0}
+.shade{position:absolute;inset:0;background:linear-gradient(180deg,#000a 0,#0000 22%,#0000 55%,#000d 100%);pointer-events:none}
+.top{position:relative;display:flex;justify-content:space-between;align-items:center;padding:calc(12px + var(--safe-t)) 16px 0;gap:8px}
+.pill{background:#0009;backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);border:1px solid #ffffff1f;border-radius:99px;padding:7px 12px;font-size:13px;display:flex;align-items:center;gap:8px}
+.pill .dot{width:8px;height:8px;border-radius:50%;background:var(--mute)}
+[data-state=listening] .pill .dot{background:var(--ok)}
+[data-state=transcribing] .pill .dot,[data-state=thinking] .pill .dot{background:#ffd166}
+[data-state=speaking] .pill .dot{background:var(--accent)}
+.stage{position:relative;flex:1;display:flex;align-items:center;justify-content:center}
+#orb{--lvl:0;width:min(46vw,220px);aspect-ratio:1;border-radius:50%;border:0;cursor:pointer;
+  background:radial-gradient(circle at 35% 30%,#ffffffa0,transparent 38%),conic-gradient(from var(--spin,0deg),var(--accent),var(--accent2),#5ee1d5,var(--accent));
+  transform:scale(calc(.82 + var(--lvl)*.45));transition:transform .08s linear;box-shadow:0 0 calc(30px + var(--lvl)*90px) color-mix(in srgb,var(--accent) 60%,transparent);animation:spin 8s linear infinite}
+#call:not(.nocam) #orb{width:min(22vw,96px);position:absolute;right:16px;bottom:8px}
+[data-state=thinking] #orb,[data-state=transcribing] #orb{animation:spin 1.6s linear infinite,pulse 1.2s ease-in-out infinite}
+@property --spin{syntax:"<angle>";inherits:false;initial-value:0deg}
+@keyframes spin{to{--spin:360deg}}
+@keyframes pulse{50%{filter:brightness(1.3)}}
+.captions{position:relative;padding:0 16px 10px;display:flex;flex-direction:column;gap:6px;max-height:38dvh;overflow:hidden;justify-content:flex-end}
+.cap{font-size:clamp(17px,4.6vw,22px);line-height:1.35;text-shadow:0 1px 6px #000}
+.cap.you{color:#cfd6e4;font-size:15px}
+.cap.you::before{content:"You  ";color:var(--mute);font-size:12px}
+.cap.tr{color:#ffd166;font-size:15px}
+form.type{position:relative;display:flex;gap:8px;padding:0 16px 10px}
+form.type input{flex:1;min-width:0;background:#000a;border:1px solid #ffffff26;border-radius:99px;padding:12px 16px;font-size:16px}
+form.type button{border:0;border-radius:99px;padding:0 16px;background:#ffffff1f}
+.controls{position:relative;display:flex;justify-content:center;gap:14px;padding:6px 16px calc(16px + var(--safe-b))}
+.cbtn{width:58px;height:58px;border-radius:50%;border:0;background:#ffffff1f;backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);display:grid;place-items:center;cursor:pointer}
+.cbtn svg{width:26px;height:26px;fill:none;stroke:#fff;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+.cbtn.off{background:#fff}.cbtn.off svg{stroke:#000}
+.cbtn.end{background:var(--bad)}
+.cbtn.on{background:var(--accent)}
+/* ---------- sheets ---------- */
+.sheet{position:fixed;inset:auto 0 0 0;max-height:80dvh;background:var(--panel);border-radius:20px 20px 0 0;border-top:1px solid var(--line);padding:12px 16px calc(16px + var(--safe-b));overflow:auto;z-index:5;display:flex;flex-direction:column;gap:10px}
+.sheet header{display:flex;justify-content:space-between;align-items:center}
+.sheet h2{font-size:17px;margin:0}
+#mapBox{height:60dvh;border-radius:14px;overflow:hidden;background:#0f1218}
+.log p{margin:0 0 8px;font-size:14px}.log b{color:var(--mute);font-weight:500}
+@media (min-width:900px){.sheet{left:auto;right:16px;bottom:16px;width:420px;border-radius:20px;border:1px solid var(--line)}}
+</style>
+<!-- Silero VAD (global `vad`) and its ONNX runtime -->
+<script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/ort.wasm.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@ricky0123/vad-web@0.0.31/dist/bundle.min.js"></script>
+<script type="module" src="js/app.js"></script>
+</head>
+<body>
+<section id="setup">
+  <div class="brand"><div class="mini"></div><div><h1>Live</h1><p class="tag">Talk and show. Runs on your device, works offline.</p></div></div>
+  <div class="chips" id="chips"></div>
+  <div class="card">
+    <label class="row">Mode
+      <select id="mode">
+        <option value="chat">Assistant — talk with the AI</option>
+        <option value="de-en">Translator — German → English</option>
+      </select>
+    </label>
+    <label class="row">Brain (language model)<select id="brain"></select></label>
+    <label class="row">Voice<select id="voice"></select></label>
+    <div class="toggle"><span>Camera (the AI can see)</span><input type="checkbox" id="useCam" checked></div>
+    <div class="toggle"><span>Interrupt by talking</span><input type="checkbox" id="bargeIn" checked></div>
+    <p class="note">First start downloads the models once (about 1–3 GB, Wi-Fi recommended). After that everything runs offline. Headphones give the best interruption.</p>
+  </div>
+  <button class="primary" id="start">Start</button>
+  <div class="prog hidden" id="prog"></div>
+  <p class="err hidden" id="err"></p>
+  <button class="ghost" id="openMap">Berlin map (offline)</button>
+  <p class="note" id="installHint"></p>
+</section>
+
+<section id="call" class="hidden" data-state="idle">
+  <video id="cam" playsinline muted autoplay></video>
+  <div class="shade"></div>
+  <div class="top">
+    <div class="pill"><span class="dot"></span><span id="status">Starting…</span></div>
+    <div class="pill" id="modelPill"></div>
+  </div>
+  <div class="stage"><button id="orb" aria-label="Tap to interrupt"></button></div>
+  <div class="captions" id="captions"></div>
+  <form class="type" id="typeForm" autocomplete="off">
+    <input id="typeIn" placeholder="Type a message…" enterkeyhint="send">
+    <button type="submit" aria-label="Send">➤</button>
+  </form>
+  <div class="controls">
+    <button class="cbtn" id="micBtn" aria-label="Mute microphone"><svg viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg></button>
+    <button class="cbtn" id="camBtn" aria-label="Camera on/off"><svg viewBox="0 0 24 24"><rect x="3" y="7" width="13" height="10" rx="2"/><path d="m16 11 5-3v8l-5-3"/></svg></button>
+    <button class="cbtn" id="flipBtn" aria-label="Switch camera"><svg viewBox="0 0 24 24"><path d="M4 7h3l2-2h6l2 2h3v12H4z"/><path d="M9 13a3 3 0 0 1 5-2.2M15 13a3 3 0 0 1-5 2.2"/></svg></button>
+    <button class="cbtn" id="mapBtn" aria-label="Berlin map"><svg viewBox="0 0 24 24"><path d="M9 4 3 6v14l6-2 6 2 6-2V4l-6 2z"/><path d="M9 4v14M15 6v14"/></svg></button>
+    <button class="cbtn" id="logBtn" aria-label="Transcript"><svg viewBox="0 0 24 24"><path d="M4 5h16M4 10h16M4 15h10"/></svg></button>
+    <button class="cbtn end" id="endBtn" aria-label="End"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
+  </div>
+</section>
+
+<section class="sheet hidden" id="mapSheet">
+  <header><h2>Berlin (offline)</h2><button class="ghost" data-close>Close</button></header>
+  <div class="prog" id="mapProg"></div>
+  <div id="mapBox"></div>
+</section>
+<section class="sheet hidden" id="logSheet">
+  <header><h2>Transcript</h2><button class="ghost" data-close>Close</button></header>
+  <div class="log" id="log"></div>
+</section>
+</body>
+</html>
