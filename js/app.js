@@ -302,8 +302,17 @@ async function handleIntent(text, my) {
   // 0) persistent memory
   const rem = text.match(/^\s*(?:please\s+)?remember(?:\s+that)?\s+(.{3,})$/i);
   if (rem) { await memory.remember(rem[1].replace(/[.!]+$/, '')); say("Okay, I'll remember that.", my); return true; }
-  if (/\bwhat do you (remember|know about me)\b/.test(t)) {
-    say(memory.facts.length ? 'You told me: ' + memory.facts.map((f) => f.text).join('; ') + '.' : "You haven't asked me to remember anything yet.", my); return true;
+  const name = text.match(/\b(?:my name is|i am called|call me)\s+([A-ZÄÖÜa-zäöüß][\wäöüß-]{1,30})/i);
+  if (name) { await memory.remember(`The user's name is ${name[1]}`); say(`Nice to meet you, ${name[1]}. I'll remember that.`, my); return true; }
+  const like = text.match(/^\s*i (?:really )?(like|love|prefer|hate|don'?t like)\s+(.{3,60})$/i);
+  if (like) { await memory.remember(`The user ${like[1].toLowerCase()}s ${like[2].replace(/[.!]+$/, '')}`.replace('dont likes', "doesn't like").replace("don't likes", "doesn't like")); }
+  if (/\b(what do you (remember|know about me)|do you (know|remember) me|who am i|what'?s my name|do you remember)\b/.test(t)) {
+    const nm = memory.facts.map((f) => f.text).reverse().find((x) => x.startsWith("The user's name is"));
+    const past = memory.turns.filter((x) => x.who === 'You').length;
+    say(memory.facts.length
+      ? `${nm ? `Yes, you're ${nm.replace("The user's name is ", '')}. ` : ''}I remember: ` + memory.facts.map((f) => f.text.replace(/^The user/, 'you')).join('; ') + `. We've talked ${past} times.`
+      : past > 1 ? `We've talked ${past} times, but you haven't told me about yourself yet. Tell me your name and I'll remember it.` : "Not yet. Tell me your name and what you like, and I'll remember it on this device.", my);
+    return true;
   }
   if (/\bforget (everything|all)\b/.test(t)) { await memory.forgetAll(); if (brain) brain.history = []; say('Done. I forgot everything.', my); return true; }
   // 2) "I'm here / done / next" → finish current stop, guide to the next one

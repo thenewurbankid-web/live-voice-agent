@@ -1,6 +1,6 @@
 // Persistent on-device memory (IndexedDB via idb-keyval): facts, conversation, images, voice clips.
 const IDB = 'https://cdn.jsdelivr.net/npm/idb-keyval@6.3.0/+esm';
-const LIMITS = { turns: 200, images: 40, clips: 30, facts: 50 };
+const LIMITS = { turns: 200, images: 40, clips: 30, facts: 50, recBytes: 300 * 1024 * 1024 };
 
 let kv;
 const db = async () => (kv ||= await import(IDB));
@@ -66,6 +66,34 @@ export class Memory {
   async clip(id) { return (await db()).get('mem:clip:' + id); }
 
   async remember(fact) { this.facts.push({ at: new Date().toISOString(), text: fact }); await this._save(); }
+
+  // ---- continuous conversation recordings (MediaRecorder chunks) ----
+  async addChunk(sessionId, blob, mime) {
+    const { get, set, del } = await db();
+    const recs = (await get('mem:recs')) || [];           // [{ id, start, mime, chunks: n, bytes }]
+    let r = recs.find((x) => x.id === sessionId);
+    if (!r) { r = { id: sessionId, start: new Date().toISOString(), mime, chunks: 0, bytes: 0 }; recs.push(r); }
+    await set(`mem:rec:${sessionId}:${r.chunks}`, blob);
+    r.chunks++; r.bytes += blob.size; r.end = new Date().toISOString();
+    // cap total size: drop the oldest recordings first
+    let total = recs.reduce((a, x) => a + x.bytes, 0);
+    while (total > LIMITS.recBytes && recs.length > 1) {
+      const old = recs.shift(); total -= old.bytes;
+      for (let i = 0; i < old.chunks; i++) await del(`mem:rec:${old.id}:${i}`);
+    }
+    await set('mem:recs', recs);
+  }
+
+  async recordings() { return ((await (await db()).get('mem:recs')) || []).slice().reverse(); }
+
+  async recording(id) {
+    const { get } = await db();
+    const r = ((await get('mem:recs')) || []).find((x) => x.id === id);
+    if (!r) return null;
+    const parts = [];
+    for (let i = 0; i < r.chunks; i++) { const b = await get(`mem:rec:${id}:${i}`); if (b) parts.push(b); }
+    return new Blob(parts, { type: r.mime });
+  }
 
   async forgetAll() {
     const { clear } = await db();
