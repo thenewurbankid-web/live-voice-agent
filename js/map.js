@@ -93,6 +93,68 @@ export class BerlinMap {
     this.map?.flyTo({ center: [lng, lat], zoom, essential: true });
   }
 
+  // ---- Phase 2: plan overlay (route lines, numbered markers, user dot) ----
+  _fc(features) { return { type: 'FeatureCollection', features }; }
+
+  _ensurePlanLayers() {
+    const m = this.map;
+    if (!m || m.getSource('plan-route')) return;
+    m.addSource('plan-route', { type: 'geojson', data: this._fc([]) });
+    m.addLayer({ id: 'plan-route-casing', type: 'line', source: 'plan-route',
+      layout: { 'line-cap': 'round', 'line-join': 'round' }, paint: { 'line-color': '#fff', 'line-width': 8, 'line-opacity': 0.9 } });
+    m.addLayer({ id: 'plan-route-line', type: 'line', source: 'plan-route',
+      layout: { 'line-cap': 'round', 'line-join': 'round' },
+      paint: { 'line-color': ['case', ['get', 'online'], '#3b6fe0', '#8a5cf0'], 'line-width': 4,
+               'line-dasharray': ['case', ['get', 'online'], ['literal', [1, 0]], ['literal', [2, 1.5]]] } });
+    m.addSource('plan-user', { type: 'geojson', data: this._fc([]) });
+    m.addLayer({ id: 'plan-user-halo', type: 'circle', source: 'plan-user', paint: { 'circle-radius': 14, 'circle-color': '#38d39f', 'circle-opacity': 0.25 } });
+    m.addLayer({ id: 'plan-user-dot', type: 'circle', source: 'plan-user',
+      paint: { 'circle-radius': 6, 'circle-color': '#38d39f', 'circle-stroke-color': '#fff', 'circle-stroke-width': 2 } });
+  }
+
+  drawPlan(plan) {
+    if (!this.map || !plan) return;
+    const gl = window.maplibregl;
+    this._ensurePlanLayers();
+    this.map.getSource('plan-route').setData(this._fc(
+      (plan.legs || []).filter(l => l && l.line).map(l => ({ type: 'Feature', properties: { online: !!l.online }, geometry: l.line }))));
+    (this._planMarkers || []).forEach(mk => mk.remove());
+    this._planMarkers = [];
+    const pts = [];
+    const add = (lng, lat, label, bg) => {
+      const el = document.createElement('div');
+      el.textContent = label;
+      el.style.cssText = `width:26px;height:26px;border-radius:50%;background:${bg};color:#fff;font:700 13px/26px system-ui,sans-serif;text-align:center;border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,.5)`;
+      this._planMarkers.push(new gl.Marker({ element: el }).setLngLat([lng, lat]).addTo(this.map));
+      pts.push([lng, lat]);
+    };
+    if (plan.start) add(plan.start.lng, plan.start.lat, 'S', '#555');
+    (plan.stops || []).forEach((st, i) => {
+      const cur = plan.status === 'active' && i === plan.current;
+      add(st.place.lng, st.place.lat, String(i + 1), st.done ? '#38d39f' : cur ? '#ff9f43' : '#3b6fe0');
+    });
+    (plan.legs || []).forEach(l => (l?.line?.coordinates || []).forEach(c => pts.push(c)));
+    if (pts.length) {
+      const b = pts.reduce((a, c) => [[Math.min(a[0][0], c[0]), Math.min(a[0][1], c[1])], [Math.max(a[1][0], c[0]), Math.max(a[1][1], c[1])]],
+        [[pts[0][0], pts[0][1]], [pts[0][0], pts[0][1]]]);
+      this.map.fitBounds(b, { padding: 50, maxZoom: 16, duration: 600 });
+    }
+  }
+
+  showUser(lng, lat) {
+    if (!this.map) return;
+    this._ensurePlanLayers();
+    this.map.getSource('plan-user').setData(this._fc([{ type: 'Feature', properties: {}, geometry: { type: 'Point', coordinates: [lng, lat] } }]));
+  }
+
+  clearPlan() {
+    (this._planMarkers || []).forEach(mk => mk.remove());
+    this._planMarkers = [];
+    if (!this.map || !this.map.getSource('plan-route')) return;
+    this.map.getSource('plan-route').setData(this._fc([]));
+    this.map.getSource('plan-user').setData(this._fc([]));
+  }
+
   hide() {
     this.el.style.display = 'none';
   }

@@ -59,13 +59,15 @@ export class Voice {
     onProgress(1, 'Voice ready');
   }
 
-  say(text) {
+  say(text, { lang = '' } = {}) {
     const t = clean(text);
     if (!t) return;
     const gen = this.gen;
     this.pending++;
     let item;
-    if (this.voiceKey === 'browser' || !this.tts) {
+    if (lang) {
+      item = Promise.resolve({ lang, text: t }); // non-English (e.g. te-IN): device voice for that language
+    } else if (this.voiceKey === 'browser' || !this.tts) {
       item = Promise.resolve(t);
     } else {
       // synth starts as soon as the previous synth finishes, overlapping playback of earlier items
@@ -79,6 +81,7 @@ export class Voice {
         const r = await item;
         if (gen !== this.gen || !r) return;
         if (typeof r === 'string') await this._speak(r, gen);
+        else if (r.lang) await this._speak(r.text, gen, r.lang);
         else await this._play(r, gen);
       } finally {
         if (--this.pending === 0) this._flush();
@@ -100,9 +103,20 @@ export class Voice {
     });
   }
 
-  _speak(text, gen) {
+  hasVoice(lang) {
+    const p = lang.toLowerCase().split('-')[0];
+    return speechSynthesis.getVoices().some((v) => v.lang.toLowerCase().startsWith(p));
+  }
+
+  _speak(text, gen, lang = '') {
     return new Promise((resolve) => {
       const u = new SpeechSynthesisUtterance(text);
+      if (lang) {
+        u.lang = lang;
+        const p = lang.toLowerCase().split('-')[0];
+        const v = speechSynthesis.getVoices().find((x) => x.lang.toLowerCase().startsWith(p));
+        if (v) u.voice = v;
+      }
       u.onend = u.onerror = () => resolve();
       if (gen !== this.gen) return resolve();
       speechSynthesis.speak(u);

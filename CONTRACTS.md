@@ -71,3 +71,85 @@ export class Eyes {
 State machine idle→listening→transcribing→thinking→speaking, turn counter for cancellation,
 barge-in on `onSpeechStart`, sentence chunking of the LLM stream into `voice.say`.
 PWA: `manifest.webmanifest`, `sw.js` (cache app shell; models are cached by the libraries themselves), `icon.svg`.
+
+---
+# Phase 2 — Berlin day / night-out planner (fixed contracts)
+
+Offline-first with a **web switch** (`online: boolean`, set by the user; also forced false when
+`!navigator.onLine`). Every online path must fall back to its offline path on any error.
+Shared types:
+```js
+// Place  = { id, name, cat, lng, lat, tags: { opening_hours?, website?, cuisine?, addr? } }
+//          cat ∈ 'bar','pub','club','biergarten','cafe','restaurant','sight','museum','park'
+// Route  = { line: GeoJSON LineString, distanceM, durationS, steps: [{ text, distanceM, lng, lat }], online: boolean }
+// Stop   = { place: Place, arrive: ISO, leave: ISO, done: boolean }
+// Plan   = { id, title, kind: 'day'|'night', created: ISO, start: {lng,lat,label}, stops: Stop[],
+//            legs: Route[] /* legs[i] = start-or-stop[i-1] → stop[i] */, status: 'draft'|'active'|'done', current: number }
+```
+
+## js/places.js + data/berlin-pois.json (offline OSM POIs)
+```js
+export const CATEGORIES   // [{ key:'bar', label:'Bars', night:true, day:false, minutes:60 }, ...] for every cat above
+export class Places {
+  async load()                       // fetch data/berlin-pois.json once (cached by sw.js like the shell)
+  async search({ cats, near /*{lng,lat}*/, radiusM = 1500, query = '', limit = 20, online = false }) // → Place[] sorted by distance
+  async geocode(text, { online })    // → { lng, lat, label } | null ; offline: match a POI/sight name or a built-in list of Berlin neighbourhoods/stations; online: Nominatim (bounded to Berlin, 1 req/s)
+}
+```
+`data/berlin-pois.json`: generated once from Overpass by `tools/build-pois.sh`, compact array form
+`[[id,name,cat,lng,lat,opening_hours|null],...]`, named places only, < 5 MB. Online search: Overpass API, around:radius.
+
+## js/routing.js + js/navigator.js
+```js
+export async function route(points /*[{lng,lat}...] ≥2*/, { online })  // → Route ; online: https://routing.openstreetmap.de/routed-foot/route/v1/foot/…?overview=full&geometries=geojson&steps=true ; offline: straight segments, distance ×1.3 detour factor, 4.8 km/h, steps "Walk 350 m north-east to <name>"
+export class Navigator {                                                  // live turn-by-turn on a Route
+  constructor({ onUpdate /*({ lng, lat, stepIndex, step, remainingM, arrived })=>void*/ })
+  start(route); stop()                                                    // navigator.geolocation.watchPosition, high accuracy; arrived when < 30 m from the end
+  static async here()                                                     // → {lng,lat} | null (getCurrentPosition, 8 s timeout)
+}
+```
+
+## js/planner.js + js/plans-store.js (deterministic planning, no LLM)
+```js
+export async function buildPlan({ kind, start /*{lng,lat,label}*/, startTime /*Date*/, stops = 4, cats /*optional override*/, vibe = '' }, { places, route, online }) // → Plan
+//  day default cats: cafe → sight/museum → restaurant → park/biergarten ; night: restaurant → bar → pub/bar → club
+//  greedy nearest next stop within 1500 m (widen to 3000 m if none), prefer places whose opening_hours (opening_hours.js lib, OSS) say open at arrival, never repeat a place
+//  stay = CATEGORIES[cat].minutes; legs via route(); title like "Night out · Kreuzberg"
+export function replaceStop(plan, index, place, deps) ; export function removeStop(plan, index, deps) ; export function moveStop(plan, from, to, deps) // → Promise<Plan> recomputing times + legs
+export class PlansStore {   // IndexedDB via idb-keyval (OSS, CDN), key 'plans'
+  async list()             // → Plan[] newest first
+  async get(id); async save(plan); async remove(id)
+  async active()           // → Plan | null (status 'active')
+}
+```
+
+## js/web.js (agent web access, key-free CORS APIs only)
+```js
+export async function webSearch(query, { limit = 5 } = {}) // → [{ title, snippet, url, source }] ; Wikipedia (en + de) search API with origin=*, plus DuckDuckGo Instant Answer if CORS allows
+export async function readPage(url)                         // → plain text summary (Wikipedia REST /page/summary for wiki URLs; otherwise '')
+export function needsWeb(text)                              // → boolean: heuristics like "search", "look up", "latest", "news", "who is", "what is"
+```
+
+## js/plan-ui.js (Plan sheet; extends the map)
+```js
+export class PlanUI {
+  constructor(rootEl, { places, store, map /*BerlinMap*/, buildPlan, replaceStop, removeStop, moveStop, route, Navigator, getOnline /*()=>boolean*/, speak /*(text)=>void*/ })
+  async open(view = 'active' /*'new'|'active'|'history'*/) ; close()
+  async showPlan(plan)     // timeline of stops (time, name, category, walk minutes), progress bar = done/total + ETA to end, Start/Next/Done buttons, Navigate button per leg, swap/remove/reorder per stop
+  async createFromVoice({ kind, startText, stops })  // used by app.js intents
+}
+```
+Also adds to js/map.js (owned by the plan-ui agent): `drawPlan(plan)` (route lines + numbered markers), `showUser(lng,lat)`, `clearPlan()`.
+Views: **New** (Day/Night toggle, start = "My location" or typed place, start time, # stops, Build), **Active** (map + timeline + progress), **History** (previous plans: open, duplicate, delete). Mobile-first bottom sheet, same CSS tokens as index.html (`--panel`, `--line`, `--accent`, …), styles injected by the module.
+
+## app.js wiring (main session)
+Web toggle on setup + call screen; intents: "plan a night out / day in <area>" → PlanUI.createFromVoice; "navigate / next stop" → Navigator; "find bars near …" → Places.search, spoken summary; needsWeb(text) → webSearch results passed to the brain as context. Brain only narrates results; it never invents places.
+
+## js/ocr.js (German text in the camera → English)
+```js
+export class GermanOCR {
+  async load(onProgress)          // Tesseract.js (OSS, CDN-pinned) worker with 'deu' language data; worker/core/lang paths all on cdn.jsdelivr.net so sw.js caches them for offline
+  async read(dataUrl)             // → recognized German text, cleaned (joined lines, dropped 1–2 char noise, confidence > 60 words only)
+}
+```
+app.js: translator mode gets a "Translate what I see" button: eyes.snapshot(1280) → ocr.read → translator.deToEn → caption + voice.say.

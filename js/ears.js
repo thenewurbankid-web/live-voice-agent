@@ -17,7 +17,7 @@ export class Ears {
     const { pipeline } = await import(TRANSFORMERS);
 
     const useGpu = !profile.mobile && profile.webgpu;
-    const model = useGpu ? 'onnx-community/whisper-base' : 'onnx-community/whisper-tiny';
+    const model = profile.asrModel || (useGpu ? 'onnx-community/whisper-base' : 'onnx-community/whisper-tiny');
     const opts = useGpu
       ? { device: 'webgpu', dtype: { encoder_model: 'fp32', decoder_model_merged: 'q4' } }
       : { device: 'wasm', dtype: 'q8' };

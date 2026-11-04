@@ -4,6 +4,18 @@ import { Ears } from './ears.js';
 import { VOICES, Voice } from './voice.js';
 import { Eyes } from './eyes.js';
 import { Translator } from './translate.js';
+import { GermanOCR } from './ocr.js';
+import { Places, CATEGORIES } from './places.js';
+import { route } from './routing.js';
+import { Navigator } from './navigator.js';
+import { buildPlan, replaceStop, removeStop, moveStop } from './planner.js';
+import { PlansStore } from './plans-store.js';
+import { PlanUI } from './plan-ui.js';
+import { webSearch, needsWeb } from './web.js';
+import { Memory } from './memory.js';
+const memory = new Memory();
+await memory.load().catch(() => { memory.facts = []; memory.turns = []; });
+let lastAudio = null;
 
 const $ = (id) => document.getElementById(id);
 const store = {
@@ -38,6 +50,7 @@ $('voice').value = store.get('voice', 'af_heart');
 $('mode').value = store.get('mode', 'chat');
 $('useCam').checked = store.get('useCam', true);
 $('bargeIn').checked = store.get('bargeIn', true);
+$('useWeb').checked = store.get('useWeb', true);
 const syncMode = () => { $('brain').closest('label').classList.toggle('hidden', $('mode').value !== 'chat'); };
 $('mode').onchange = syncMode; syncMode();
 
@@ -65,6 +78,7 @@ function progressRow(container, label) {
 }
 
 // ---------- state ----------
+let ocr;
 let brain, ears, voice, eyes, translator, audioCtx, micStream, micAnalyser;
 let state = 'idle', turn = 0, micOn = true, mode = 'chat', bargeIn = true;
 const history = [];
@@ -74,7 +88,7 @@ function setState(s) {
   $('call').dataset.state = s;
   $('status').textContent = {
     listening: micOn ? 'Listening' : 'Mic muted',
-    transcribing: mode === 'de-en' ? 'Translating…' : 'Hearing you…',
+    transcribing: mode === 'chat' ? 'Hearing you…' : 'Translating…',
     thinking: 'Thinking…', looking: 'Looking…', speaking: 'Speaking · tap orb to interrupt',
   }[s] || s;
 }
@@ -88,8 +102,9 @@ function caption(kind, text) {
   }
   el.textContent = text;
 }
-function logLine(who, text) {
+function logLine(who, text, extra = {}) {
   history.push({ who, text });
+  memory.addTurn(who, text, extra).catch(() => {});
   const p = document.createElement('p'); p.innerHTML = `<b>${who}:</b> `; p.append(text);
   $('log').append(p);
 }
@@ -111,12 +126,14 @@ async function onUtterance(audio) {
   if (state === 'speaking' && !bargeIn) return;
   const my = ++turn;
   brain?.interrupt(); voice?.stop();
+  lastAudio = audio;
   setState('transcribing');
-  const opts = mode === 'de-en' ? { language: 'german', task: 'translate' } : {};
+  const opts = { 'de-en': { language: 'german', task: 'translate' }, 'te-en': { language: 'telugu', task: 'translate' } }[mode] || {};
   const text = await ears.transcribe(audio, opts).catch(() => '');
   if (my !== turn) return;
   if (!text) { setState('listening'); return; }
-  if (mode === 'de-en') return speakTranslation(text, my);
+  if (mode === 'de-en' || mode === 'te-en') return speakTranslation(text, my);
+  if (mode === 'en-te') return speakTelugu(text, my);
   return respond(text, my);
 }
 
@@ -125,6 +142,17 @@ async function speakTranslation(english, my) {
   setState('speaking');
   voice.say(english);
   await voice.drain();
+  if (my === turn) setState('listening');
+}
+
+async function speakTelugu(english, my) {
+  caption('you', english); logLine('English', english);
+  setState('transcribing');
+  const te = await translator.enToTe(english).catch(() => '');
+  if (my !== turn || !te) return setState('listening');
+  caption('tr', te); logLine('తెలుగు', te);
+  setState('speaking');
+  if (voice.hasVoice('te-IN')) { voice.say(te, { lang: 'te-IN' }); await voice.drain(); }
   if (my === turn) setState('listening');
 }
 
@@ -138,7 +166,19 @@ function cutPoint(s, first) {
 }
 
 async function respond(text, my) {
-  caption('you', text); logLine('You', text);
+  caption('you', text);
+  logLine('You', text, { image: eyes?.enabled ? eyes.snapshot(448) : null, audio: lastAudio });
+  lastAudio = null;
+  if (await handleIntent(text, my)) return;
+  const mem = memory.context();
+  if (mem) text += '\n\n(' + mem + ')';
+  if (my !== turn) return;
+  if (getOnline() && needsWeb(text)) {
+    setState('thinking');
+    const hits = await webSearch(text, { limit: 3 }).catch(() => []);
+    if (my !== turn) return;
+    if (hits.length) text += '\n\n(Web results — answer from these, mention the source:\n' + hits.map((h) => `- ${h.title} (${h.source}): ${h.snippet}`).join('\n') + ')';
+  }
   let image = null, scene = null;
   const frame = eyes?.enabled ? eyes.snapshot(brain.vision ? 448 : 384) : null;
   if (frame && brain.vision) image = frame;
@@ -169,14 +209,169 @@ async function respond(text, my) {
 async function onTyped(text) {
   const my = ++turn;
   brain?.interrupt(); voice?.stop();
-  if (mode === 'de-en') {
-    caption('you', text); logLine('Deutsch', text);
+  if (mode === 'en-te') return speakTelugu(text, my);
+  if (mode === 'de-en' || mode === 'te-en') {
+    caption('you', text); logLine(mode === 'de-en' ? 'Deutsch' : 'తెలుగు', text);
     setState('transcribing');
-    const en = await translator.deToEn(text).catch(() => '');
+    const en = await (mode === 'de-en' ? translator.deToEn(text) : translator.teToEn(text)).catch(() => '');
     if (my === turn && en) return speakTranslation(en, my);
     return setState('listening');
   }
   return respond(text, my);
+}
+
+// ---------- planner + places (deterministic; the LLM never invents places) ----------
+let webOn = true;
+const getOnline = () => webOn && navigator.onLine;
+const places = new Places();
+const plans = new PlansStore();
+let berlinForPlans, planUI;
+async function getPlanUI() {
+  if (planUI) return planUI;
+  await openMap();               // map data + MapLibre must be up before plans draw on it
+  berlinForPlans = berlin;
+  await places.load();
+  planUI = new PlanUI($('planSheet'), {
+    places, store: plans, map: berlinForPlans, buildPlan, replaceStop, removeStop, moveStop, route, Navigator, getOnline,
+    speak: (t) => voice?.say(t),
+  });
+  return planUI;
+}
+async function openPlans(view) {
+  const ui = await getPlanUI();
+  await openMap();
+  await ui.open(view);
+}
+
+const CAT_WORDS = [
+  [/\b(bars?|cocktails?|drinks?)\b/i, 'bar'], [/\b(pubs?|kneipe)\b/i, 'pub'], [/\b(clubs?|clubbing|techno|dance|party)\b/i, 'club'],
+  [/\b(biergarten|beer ?gardens?)\b/i, 'biergarten'], [/\b(caf[eé]s?|coffee)\b/i, 'cafe'], [/\b(restaurants?|food|eat|dinner|lunch)\b/i, 'restaurant'],
+  [/\b(museums?)\b/i, 'museum'], [/\b(sights?|attractions?|landmarks?)\b/i, 'sight'], [/\b(parks?)\b/i, 'park'],
+];
+const areaOf = (t) => (t.match(/\b(?:in|around|near|at|from)\s+([A-ZÄÖÜa-zäöüß][\wäöüß .-]{2,30}?)(?:[,.?!]|$|\s+(?:with|for|and|tonight|today|please))/i) || [])[1]?.trim();
+const NUMS = { two: 2, three: 3, four: 4, five: 5, six: 6 };
+
+async function handleIntent(text, my) {
+  const t = text.toLowerCase();
+  // 1) build a plan
+  if (/\b(plan|organi[sz]e|make)\b/.test(t) && /\b(night|evening|day|tour|trip|afternoon|out)\b/.test(t)) {
+    setState('thinking');
+    const kind = /\b(night|evening|bar|drinks|party|club)\b/.test(t) ? 'night' : 'day';
+    const n = +(t.match(/\b(\d)\s+(?:stops|places|bars)\b/) || [])[1] || NUMS[(t.match(/\b(two|three|four|five|six)\b/) || [])[1]] || 4;
+    const ui = await getPlanUI();
+    await ui.open('active');
+    const plan = await ui.createFromVoice({ kind, startText: areaOf(text) || '', stops: n });
+    if (my !== turn) return true;
+    const names = plan?.stops?.map((s) => s.place.name) || [];
+    say(names.length ? `Here's your ${kind === 'night' ? 'night out' : 'day'}: ${names.join(', then ')}. Tap Start when you're ready.` : `I couldn't find enough places there. Try another area.`, my);
+    return true;
+  }
+  // A) translation inside the assistant (models load on first use, then work offline)
+  const signAsk = /\b(what does (this|that|the) (sign|menu|text|label|say)|read (this|the) (sign|menu|text)|translate (this|that|what i see|the sign|the menu))\b/.test(t);
+  if (signAsk) {
+    const frame = eyes?.snapshot(1280);
+    if (!frame) { say('Turn the camera on and point it at the text.', my); return true; }
+    setState('looking');
+    translator ||= new Translator();
+    ocr ||= new GermanOCR();
+    const [de] = await Promise.all([ocr.read(frame).catch(() => ''), translator.load().catch(() => {})]);
+    if (my !== turn) return true;
+    if (!de) { say("I can't read any German text there. Hold it closer and steady.", my); return true; }
+    const en = await translator.deToEn(de).catch(() => '');
+    say(en ? `It says: ${en}` : `I read: ${de}`, my);
+    return true;
+  }
+  const tr = text.match(/^\s*(?:please\s+)?(?:translate|how do (?:you|i) say)\s+["“']?(.+?)["”']?\s+(?:in|into|to)\s+(german|deutsch|english|telugu)\s*[?.!]*$/i);
+  if (tr) {
+    const [, phrase, lang] = tr; const L = lang.toLowerCase();
+    setState('thinking');
+    translator ||= new Translator();
+    let out = '';
+    if (L === 'german' || L === 'deutsch') out = await translator.enToDe(phrase).catch(() => '');
+    else if (L === 'telugu') { await translator.loadTelugu().catch(() => {}); out = await translator.enToTe(phrase).catch(() => ''); }
+    else { await translator.load().catch(() => {}); out = await translator.deToEn(phrase).catch(() => ''); }
+    if (my !== turn) return true;
+    if (!out) { say('Sorry, I could not translate that.', my); return true; }
+    caption('tr', out); logLine(lang, out);
+    const code = { german: 'de-DE', deutsch: 'de-DE', telugu: 'te-IN' }[L];
+    setState('speaking');
+    if (code && voice.hasVoice(code)) voice.say(out, { lang: code }); else voice.say(out);
+    voice.drain().then(() => { if (my === turn) setState('listening'); });
+    return true;
+  }
+  // 0) persistent memory
+  const rem = text.match(/^\s*(?:please\s+)?remember(?:\s+that)?\s+(.{3,})$/i);
+  if (rem) { await memory.remember(rem[1].replace(/[.!]+$/, '')); say("Okay, I'll remember that.", my); return true; }
+  if (/\bwhat do you (remember|know about me)\b/.test(t)) {
+    say(memory.facts.length ? 'You told me: ' + memory.facts.map((f) => f.text).join('; ') + '.' : "You haven't asked me to remember anything yet.", my); return true;
+  }
+  if (/\bforget (everything|all)\b/.test(t)) { await memory.forgetAll(); if (brain) brain.history = []; say('Done. I forgot everything.', my); return true; }
+  // 2) "I'm here / done / next" → finish current stop, guide to the next one
+  if (/\b(i'?m here|we'?re here|arrived|done here|next place|move on|let'?s go on)\b/.test(t)) {
+    const active = await plans.active() || (await plans.list())[0];
+    if (!active) { say('There is no plan yet. Say: plan a night out near me.', my); return true; }
+    if (active.stops[active.current]) active.stops[active.current].done = true;
+    active.current = Math.min(active.current + 1, active.stops.length);
+    active.status = active.current >= active.stops.length ? 'done' : 'active';
+    await plans.save(active);
+    if (active.status === 'done') { stopGuide(); say('That was the last stop. Great day out!', my); return true; }
+    return guide(active, my);
+  }
+  // 3) navigation on the active plan
+  if (/\b(navigate|directions|take me|next stop|how do i get|guide me|let'?s go|start (the )?plan)\b/.test(t)) {
+    const active = await plans.active() || (await plans.list()).find((p) => p.status !== 'done');
+    if (!active) { say('There is no plan yet. Say: plan a night out near me.', my); return true; }
+    if (active.status !== 'active') { active.status = 'active'; await plans.save(active); }
+    return guide(active, my);
+  }
+  // 4) find places
+  const cat = CAT_WORDS.find(([re]) => re.test(t))?.[1];
+  if (cat && /\b(find|show|where|any|recommend|suggest|good|best|nearby|near me|around)\b/.test(t)) {
+    setState('thinking');
+    await places.load();
+    const area = areaOf(text);
+    const near = (area && await places.geocode(area, { online: getOnline() })) || await Navigator.here() || { lng: 13.4050, lat: 52.5200, label: 'Mitte' };
+    const found = await places.search({ cats: [cat], near, radiusM: 1200, limit: 5, online: getOnline() }).catch(() => []);
+    if (my !== turn) return true;
+    const label = CATEGORIES.find((c) => c.key === cat)?.label?.toLowerCase() || cat;
+    if (!found.length) { say(`I couldn't find ${label} near ${near.label || 'you'}.`, my); return true; }
+    const dist = (p) => Math.round(Math.hypot((p.lng - near.lng) * 67800, (p.lat - near.lat) * 111200) / 50) * 50;
+    say(`${found.length} ${label} near ${near.label || 'you'}: ` + found.slice(0, 3).map((p) => `${p.name}, about ${dist(p)} metres`).join('; ') + '. Want me to plan a route?', my);
+    return true;
+  }
+  return false;
+}
+// Spoken turn-by-turn guidance from the user's live location to the current stop.
+let nav = null;
+function stopGuide() { nav?.stop(); nav = null; }
+async function guide(plan, my) {
+  stopGuide();
+  const stop = plan.stops[plan.current];
+  if (!stop) { say('Your plan is finished.', my); return true; }
+  setState('thinking');
+  const here = await Navigator.here();
+  const from = here || (plan.current ? plan.stops[plan.current - 1].place : plan.start);
+  const leg = await route([from, stop.place], { online: getOnline() });
+  if (my !== turn) return true;
+  openPlans('active').then(() => planUI?.showPlan(plan)).catch(() => {});
+  const mins = Math.max(1, Math.round(leg.durationS / 60));
+  say(`Heading to ${stop.place.name}, ${Math.round(leg.distanceM / 50) * 50} metres, about ${mins} minutes on foot. ${leg.steps[0]?.text || ''}`, my);
+  let last = 0;
+  nav = new Navigator({
+    onUpdate: ({ lng, lat, stepIndex, step, remainingM, arrived }) => {
+      try { berlin?.showUser(lng, lat); } catch {}
+      if (arrived) { stopGuide(); voice.say(`You've arrived at ${stop.place.name}. Say "I'm here" when you want the next stop.`); return; }
+      if (stepIndex !== last && step) { last = stepIndex; caption('tr', `${step.text} · ${Math.round(remainingM)} m left`); voice.say(step.text); }
+    },
+  });
+  nav.start(leg);
+  return true;
+}
+
+function say(text, my) {
+  caption('agent', text); logLine('AI', text);
+  setState('speaking'); voice.say(text);
+  voice.drain().then(() => { if (my === turn) setState('listening'); });
 }
 
 // ---------- orb level meter ----------
@@ -199,6 +394,7 @@ async function start() {
   const useCam = $('useCam').checked;
   ['brain', 'voice', 'mode'].forEach((k) => store.set(k, $(k).value));
   store.set('useCam', useCam); store.set('bargeIn', bargeIn);
+  webOn = $('useWeb').checked; store.set('useWeb', webOn);
 
   // user-gesture work first (iOS)
   try { if (navigator.audioSession) navigator.audioSession.type = 'play-and-record'; } catch {}
@@ -223,6 +419,7 @@ async function start() {
     if (mode === 'chat') {
       if (!profile.webgpu) throw new Error('This browser has no WebGPU, which the AI brain needs. Try Chrome or Edge (Android/desktop) or Safari 26+ (iPhone). Translator mode works without it.');
       brain = new Brain($('brain').value, profile);
+      brain.history = memory.recentHistory();
       jobs.unshift(() => brain.load(progressRow(prog, 'Brain · ' + BRAINS.find((b) => b.key === $('brain').value)?.label)));
       if (useCam && !brain.vision) {
         const row = progressRow(prog, 'Eyes · SmolVLM-256M');
@@ -230,7 +427,14 @@ async function start() {
       }
     } else {
       translator = new Translator();
-      jobs.push(() => translator.load(progressRow(prog, 'Translator · Opus-MT de→en')));
+      if (mode === 'te-en') profile.asrModel = 'onnx-community/whisper-small'; // tiny/base are too weak for Telugu
+      if (mode === 'de-en') {
+        jobs.push(() => translator.load(progressRow(prog, 'Translator · Opus-MT de→en')));
+        ocr = new GermanOCR();
+        const row = progressRow(prog, 'Sign reader · Tesseract German');
+        jobs.push(() => ocr.load(row).catch(() => { ocr = null; row(1, 'skipped'); }));
+      }
+      if (mode === 'en-te') jobs.push(() => translator.loadTelugu(progressRow(prog, 'Translator · NLLB-200 en→te')));
     }
     // Phones: load one model at a time to keep memory peaks low. Desktop: in parallel.
     if (profile.mobile) { for (const j of jobs) await j(); } else await Promise.all(jobs.map((j) => j()));
@@ -246,8 +450,12 @@ async function start() {
 
 async function enterCall() {
   $('setup').classList.add('hidden'); $('call').classList.remove('hidden');
-  $('modelPill').textContent = mode === 'chat' ? BRAINS.find((b) => b.key === $('brain').value)?.label.split(' ·')[0] : 'Deutsch → English';
-  $('typeIn').placeholder = mode === 'de-en' ? 'Deutsch eingeben…' : 'Type a message…';
+  $('modelPill').textContent = mode === 'chat' ? BRAINS.find((b) => b.key === $('brain').value)?.label.split(' ·')[0]
+    : { 'de-en': 'Deutsch → English', 'te-en': 'తెలుగు → English', 'en-te': 'English → తెలుగు' }[mode];
+  if (mode === 'en-te' && !voice.hasVoice('te-IN')) caption('tr', 'No Telugu voice on this device: translations are shown as text.');
+  $('typeIn').placeholder = { 'de-en': 'Deutsch eingeben…', 'te-en': 'తెలుగులో టైప్ చేయండి…' }[mode] || 'Type a message…';
+  $('seeBtn').classList.toggle('hidden', mode !== 'de-en');
+  $('webBtn').classList.toggle('on', webOn); $('webBtn').classList.toggle('off', !webOn);
   try { await navigator.wakeLock?.request('screen'); } catch {}
   await ears.start();
   setState('listening');
@@ -271,8 +479,45 @@ $('camBtn').onclick = async () => {
   $('camBtn').classList.toggle('off', !eyes.enabled);
   $('call').classList.toggle('nocam', !eyes.enabled);
 };
+// German text in the camera (signs, menus) → English
+$('seeBtn').onclick = async () => {
+  const frame = eyes?.snapshot(1280);
+  if (!frame || !ocr) return caption('tr', 'Turn the camera on to translate what you see.');
+  const my = ++turn; voice.stop();
+  setState('looking');
+  const de = await ocr.read(frame).catch(() => '');
+  if (my !== turn) return;
+  if (!de) { caption('tr', 'No German text found — hold the text closer and steady.'); return setState('listening'); }
+  caption('you', de); logLine('Deutsch (camera)', de);
+  setState('transcribing');
+  const en = await translator.deToEn(de).catch(() => '');
+  if (my === turn && en) return speakTranslation(en, my);
+  setState('listening');
+};
 $('flipBtn').onclick = () => eyes?.flip().catch(() => {});
-$('logBtn').onclick = () => $('logSheet').classList.remove('hidden');
+$('planBtn').onclick = () => openPlans('active').catch((e) => caption('agent', 'Planner unavailable: ' + e.message));
+$('openPlan').onclick = () => openPlans('new').catch((e) => { $('err').textContent = 'Planner unavailable: ' + e.message; $('err').classList.remove('hidden'); });
+$('webBtn').onclick = () => { webOn = !webOn; store.set('useWeb', webOn); $('webBtn').classList.toggle('on', webOn); $('webBtn').classList.toggle('off', !webOn); caption('tr', webOn ? 'Web access on' : 'Offline only'); };
+$('logBtn').onclick = () => {
+  const log = $('log'); log.innerHTML = '';
+  const top = document.createElement('p');
+  top.innerHTML = `<b>Memory:</b> ${memory.facts.length} facts · ${memory.turns.length} messages, stored on this device. Say "forget everything" to clear.`;
+  log.append(top);
+  for (const t of memory.turns.slice(-60)) {
+    const p = document.createElement('p');
+    p.innerHTML = `<b>${new Date(t.at).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' })} · ${t.who}:</b> `;
+    p.append(t.text);
+    if (t.image) { const im = new Image(); im.src = t.image; im.style.cssText = 'display:block;max-width:160px;border-radius:8px;margin-top:4px'; p.append(im); }
+    if (t.clip) {
+      const b = document.createElement('button'); b.className = 'ghost'; b.textContent = '▶ voice'; b.style.marginLeft = '6px';
+      b.onclick = async () => { const blob = await memory.clip(t.clip); if (blob) new Audio(URL.createObjectURL(blob)).play(); };
+      p.append(b);
+    }
+    log.append(p);
+  }
+  $('logSheet').classList.remove('hidden');
+  log.scrollTop = log.scrollHeight;
+};
 $('endBtn').onclick = () => location.reload();
 document.querySelectorAll('[data-close]').forEach((b) => (b.onclick = () => b.closest('.sheet').classList.add('hidden')));
 

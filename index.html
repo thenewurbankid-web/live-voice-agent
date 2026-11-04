@@ -73,8 +73,8 @@ select{background:#0f1218;border:1px solid var(--line);border-radius:12px;paddin
 form.type{position:relative;display:flex;gap:8px;padding:0 16px 10px}
 form.type input{flex:1;min-width:0;background:#000a;border:1px solid #ffffff26;border-radius:99px;padding:12px 16px;font-size:16px}
 form.type button{border:0;border-radius:99px;padding:0 16px;background:#ffffff1f}
-.controls{position:relative;display:flex;justify-content:center;gap:14px;padding:6px 16px calc(16px + var(--safe-b))}
-.cbtn{width:58px;height:58px;border-radius:50%;border:0;background:#ffffff1f;backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);display:grid;place-items:center;cursor:pointer}
+.controls{position:relative;display:flex;justify-content:center;flex-wrap:wrap;gap:10px;padding:6px 16px calc(16px + var(--safe-b))}
+.cbtn{width:52px;height:52px;border-radius:50%;border:0;background:#ffffff1f;backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);display:grid;place-items:center;cursor:pointer}
 .cbtn svg{width:26px;height:26px;fill:none;stroke:#fff;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
 .cbtn.off{background:#fff}.cbtn.off svg{stroke:#000}
 .cbtn.end{background:var(--bad)}
@@ -100,18 +100,22 @@ form.type button{border:0;border-radius:99px;padding:0 16px;background:#ffffff1f
     <label class="row">Mode
       <select id="mode">
         <option value="chat">Assistant — talk with the AI</option>
-        <option value="de-en">Translator — German → English</option>
+        <option value="de-en">Translator — German → English (speech, text, camera)</option>
+        <option value="te-en">Translator — Telugu → English (speech, text)</option>
+        <option value="en-te">Translator — English → Telugu</option>
       </select>
     </label>
     <label class="row">Brain (language model)<select id="brain"></select></label>
     <label class="row">Voice<select id="voice"></select></label>
     <div class="toggle"><span>Camera (the AI can see)</span><input type="checkbox" id="useCam" checked></div>
     <div class="toggle"><span>Interrupt by talking</span><input type="checkbox" id="bargeIn" checked></div>
+    <div class="toggle"><span>Web access (live search, places &amp; walking routes)</span><input type="checkbox" id="useWeb" checked></div>
     <p class="note">First start downloads the models once (about 1–3 GB, Wi-Fi recommended). After that everything runs offline. Headphones give the best interruption.</p>
   </div>
   <button class="primary" id="start">Start</button>
   <div class="prog hidden" id="prog"></div>
   <p class="err hidden" id="err"></p>
+  <button class="ghost" id="openPlan">Berlin day / night-out planner</button>
   <button class="ghost" id="openMap">Berlin map (offline)</button>
   <p class="note" id="installHint"></p>
 </section>
@@ -133,7 +137,10 @@ form.type button{border:0;border-radius:99px;padding:0 16px;background:#ffffff1f
     <button class="cbtn" id="micBtn" aria-label="Mute microphone"><svg viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg></button>
     <button class="cbtn" id="camBtn" aria-label="Camera on/off"><svg viewBox="0 0 24 24"><rect x="3" y="7" width="13" height="10" rx="2"/><path d="m16 11 5-3v8l-5-3"/></svg></button>
     <button class="cbtn" id="flipBtn" aria-label="Switch camera"><svg viewBox="0 0 24 24"><path d="M4 7h3l2-2h6l2 2h3v12H4z"/><path d="M9 13a3 3 0 0 1 5-2.2M15 13a3 3 0 0 1-5 2.2"/></svg></button>
+    <button class="cbtn hidden" id="seeBtn" aria-label="Translate what I see"><svg viewBox="0 0 24 24"><path d="M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg></button>
     <button class="cbtn" id="mapBtn" aria-label="Berlin map"><svg viewBox="0 0 24 24"><path d="M9 4 3 6v14l6-2 6 2 6-2V4l-6 2z"/><path d="M9 4v14M15 6v14"/></svg></button>
+    <button class="cbtn" id="planBtn" aria-label="Plans"><svg viewBox="0 0 24 24"><path d="M12 21s-7-6.3-7-11a7 7 0 0 1 14 0c0 4.7-7 11-7 11z"/><circle cx="12" cy="10" r="2.5"/></svg></button>
+    <button class="cbtn on" id="webBtn" aria-label="Web access on/off"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c3 3.5 3 14.5 0 18M12 3c-3 3.5-3 14.5 0 18"/></svg></button>
     <button class="cbtn" id="logBtn" aria-label="Transcript"><svg viewBox="0 0 24 24"><path d="M4 5h16M4 10h16M4 15h10"/></svg></button>
     <button class="cbtn end" id="endBtn" aria-label="End"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
   </div>
@@ -144,6 +151,7 @@ form.type button{border:0;border-radius:99px;padding:0 16px;background:#ffffff1f
   <div class="prog" id="mapProg"></div>
   <div id="mapBox"></div>
 </section>
+<section id="planSheet" class="hidden"></section>
 <section class="sheet hidden" id="logSheet">
   <header><h2>Transcript</h2><button class="ghost" data-close>Close</button></header>
   <div class="log" id="log"></div>
