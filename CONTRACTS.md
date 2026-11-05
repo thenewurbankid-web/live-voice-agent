@@ -153,3 +153,44 @@ export class GermanOCR {
 }
 ```
 app.js: translator mode gets a "Translate what I see" button: eyes.snapshot(1280) → ocr.read → translator.deToEn → caption + voice.say.
+
+---
+# Phase 3 — Google-Maps-like screen + true offline walking routes
+
+## data/berlin-walk.bin + js/offline-router.js + js/router-worker.js (offline A* on the OSM walking network)
+Build once with `tools/build-walk-graph.sh` (Geofabrik `berlin-latest.osm.pbf` + pyosmium or osmium-tool; walkable
+`highway=*` minus motorway/trunk/construction/`foot=no`/`access=private`). Simplify to intersections (keep nodes of degree ≠ 2
+and named-street changes), edges keep length (m), street name id and a simplified polyline (Douglas–Peucker ~3 m).
+Binary file (little-endian), documented in the script header, total < 40 MB; GitHub Pages gzips it.
+```js
+// js/offline-router.js (main thread; spins up js/router-worker.js which loads the graph + ngraph.graph/ngraph.path from jsdelivr, pinned)
+export async function ensureGraph(onProgress)   // download data/berlin-walk.bin once, keep the ArrayBuffer in Cache API 'berlin-walk-v1' (offline afterwards)
+export async function routeOffline(points /*[{lng,lat}...]*/) // → Route (same shape as js/routing.js, online:false) or null if outside the graph
+//   snap each point to the nearest graph node (grid index), A* (ngraph.path.aStar, haversine heuristic), stitch polylines,
+//   steps from bearing changes > 30° and street-name changes: "Turn left onto Oranienstraße, then 200 m", 4.8 km/h
+```
+`js/routing.js` change (router agent owns it): offline branch (and online-error fallback) calls `routeOffline` first and
+only falls back to straight lines if it returns null / the graph is not available.
+
+## js/maps-ui.js (Google-Maps-like full-screen screen; extends js/map.js and js/planner.js)
+```js
+export class MapsUI {
+  constructor(rootEl, { map /*BerlinMap*/, places, route, Navigator, plans /*PlansStore*/, planner /*{ buildPlan, replaceStop, removeStop, moveStop, addStop }*/, openPlans /*(view)=>void*/, getOnline, speak })
+  async open({ query = '', place = null } = {}) ; close()
+  async search(query)            // categories by keyword (bars, cafés, food, sights, museums, parks, clubs, biergarten) or name / area via places.geocode
+  async showPlace(place)         // place card
+  async directionsTo(place, { from = null } = {}) // from = my location (Navigator.here) or a typed place; route(); draws line; step list; Start → follow-me nav
+  async addToPlan(place)         // into the active plan (or a new draft plan) via planner.addStop, saves via plans.save
+}
+```
+Layout (mobile first, all inside rootEl, which is a full-screen fixed element): map fills the screen; top: rounded search
+bar (back/menu, input, mic icon that calls `speak`-less hook `onMic` if provided) + horizontally scrolling category chips;
+bottom: draggable sheet with three snap points (peek 120 px / half / full) showing results list → place card → directions.
+Place card: name, category, open now / closed (opening_hours.js, pinned), distance + walk minutes from me, buttons
+**Directions**, **Add to plan**, **Website** (if tag). Directions: from/to rows, total min + km, offline/online badge, step
+list, **Start**. Navigation: big current-instruction banner on top, remaining min/m, recenter button, map follows the user
+(`map.follow(true)`), speak(step.text) on each new step, arrival → "You've arrived. Next plan stop?" when the place is in the active plan.
+Right-side floating buttons: my location, layers toggle "Plan" (draw active plan with numbered stops via map.drawPlan).
+Add to js/map.js: `setResults(places, onClick)`, `drawRoute(route)`, `clearRoute()`, `follow(on)`, `onLongPress(cb)` (long-press map → "Directions to here"), keep existing methods.
+Add to js/planner.js: `addStop(plan, place, index = plan.stops.length, deps)` → Promise<Plan> recomputing times + legs (like the others).
+Styles injected by the module, using index.html CSS variables; Google-Maps-like but our own look (no Google branding).

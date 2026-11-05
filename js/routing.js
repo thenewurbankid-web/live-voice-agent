@@ -1,4 +1,4 @@
-// Walking routes: public OSRM foot server online, straight-segment estimate offline.
+// Walking routes: public OSRM foot server online, offline A* on the bundled OSM graph (offline-router.js), straight-segment estimate as last resort.
 // Geo math via @turf (pinned, CDN); falls back to built-in haversine if the CDN is unreachable.
 const OSRM = 'https://routing.openstreetmap.de/routed-foot/route/v1/foot/';
 const TURF = '7.4.0';
@@ -53,6 +53,7 @@ function stepText(s, next) {
 }
 
 async function offline(points) {
+  try { const { routeOffline } = await import('./offline-router.js'); const r = await routeOffline(points); if (r) return r; } catch { /* graph unavailable → straight lines */ }
   const g = await loadGeo(), coords = points.map((p) => [p.lng, p.lat]), steps = [];
   let total = 0;
   for (let i = 1; i < points.length; i++) {

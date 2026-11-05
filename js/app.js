@@ -355,6 +355,26 @@ async function handleIntent(text, my) {
     if (active.status !== 'active') { active.status = 'active'; await plans.save(active); }
     return guide(active, my);
   }
+  // M) maps: "directions to X", "show bars on the map", "open maps"
+  const dir = text.match(/\b(?:directions|route|walk|way)\s+to\s+(.+?)[?.!]*$/i);
+  if (dir) {
+    await places.load();
+    const name = dir[1].trim();
+    const hit = (await places.search({ query: name, near: (await Navigator.here()) || { lng: 13.405, lat: 52.52 }, radiusM: 15000, limit: 1 }).catch(() => []))[0];
+    const geo = hit || await places.geocode(name, { online: getOnline() });
+    if (!geo) { say(`I couldn't find ${name}.`, my); return true; }
+    const target = hit || { id: 'geo-' + name, name: geo.label || name, cat: 'sight', lng: geo.lng, lat: geo.lat, tags: {} };
+    await openMaps();
+    await mapsUI.directionsTo(target);
+    say(`Here's the walking route to ${target.name}. Tap Start to go.`, my);
+    return true;
+  }
+  if (/\b(open (the )?maps?|show (me )?(the )?map)\b/.test(t) || (/\bon the map\b/.test(t) && CAT_WORDS.some(([re]) => re.test(t)))) {
+    const c = CAT_WORDS.find(([re]) => re.test(t))?.[1];
+    await openMaps({ query: c ? (CATEGORIES.find((x) => x.key === c)?.label || c) : (areaOf(text) || '') });
+    say(c ? `Here are ${CATEGORIES.find((x) => x.key === c)?.label?.toLowerCase() || c} on the map.` : 'Here is the map.', my);
+    return true;
+  }
   // 4) find places
   const cat = CAT_WORDS.find(([re]) => re.test(t))?.[1];
   if (cat && /\b(find|show|where|any|recommend|suggest|good|best|nearby|near me|around)\b/.test(t)) {
@@ -628,5 +648,23 @@ async function openMap() {
     await berlin.show();
   } catch (e) { prog.textContent = 'Map unavailable: ' + (e.message || e); berlin = null; }
 }
-$('mapBtn').onclick = openMap;
-$('openMap').onclick = openMap;
+// ---------- Google-Maps-like screen (offline search, directions, plans) ----------
+let mapsUI;
+async function openMaps(opts = {}) {
+  $('mapsRoot').classList.remove('hidden');
+  if (!mapsUI) {
+    const [{ MapsUI }, { BerlinMap }, planner] = await Promise.all([import('./maps-ui.js'), import('./map.js'), import('./planner.js')]);
+    const m = new BerlinMap($('mapsMap'));
+    await m.ensureOffline(() => {});
+    await m.show();
+    await places.load();
+    mapsUI = new MapsUI($('mapsRoot'), {
+      map: m, places, route, Navigator, plans, planner,
+      openPlans: (v) => openPlans(v), getOnline, speak: (t) => voice?.say(t),
+    });
+    try { (await import('./offline-router.js')).ensureGraph(() => {}).catch(() => {}); } catch {}
+  }
+  await mapsUI.open(opts);
+}
+$('mapBtn').onclick = () => openMaps().catch((e) => caption('agent', 'Maps unavailable: ' + e.message));
+$('openMap').onclick = () => openMaps().catch((e) => { $('err').textContent = 'Maps unavailable: ' + e.message; $('err').classList.remove('hidden'); });
