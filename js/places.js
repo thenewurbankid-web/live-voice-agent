@@ -129,9 +129,11 @@ export class Places {
   async _overpass(cats, near, radiusM) {
     const around = `(around:${Math.round(radiusM)},${near.lat},${near.lng})`;
     const body = cats.flatMap(overpassFilters).map((f) => `${f}["name"]${around};`).join('');
-    const q = `[out:json][timeout:25];(${body});out center tags 500;`;
-    const res = await fetch(OVERPASS, { method: 'POST', body: 'data=' + encodeURIComponent(q),
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' } });
+    const q = `[out:json][timeout:8];(${body});out center tags 500;`;
+    // public Overpass is often slow or 502s: give up after 5 s so the offline results show instantly
+    const ctl = new AbortController(); const t = setTimeout(() => ctl.abort(), 5000);
+    const res = await fetch(OVERPASS, { method: 'POST', body: 'data=' + encodeURIComponent(q), signal: ctl.signal,
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }).finally(() => clearTimeout(t));
     if (!res.ok) throw new Error('Overpass HTTP ' + res.status);
     const json = await res.json();
     return (json.elements || []).map(elementToPlace).filter(Boolean);

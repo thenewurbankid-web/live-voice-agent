@@ -102,10 +102,10 @@ export class BerlinMap {
     m.addSource('plan-route', { type: 'geojson', data: this._fc([]) });
     m.addLayer({ id: 'plan-route-casing', type: 'line', source: 'plan-route',
       layout: { 'line-cap': 'round', 'line-join': 'round' }, paint: { 'line-color': '#fff', 'line-width': 8, 'line-opacity': 0.9 } });
-    m.addLayer({ id: 'plan-route-line', type: 'line', source: 'plan-route',
-      layout: { 'line-cap': 'round', 'line-join': 'round' },
-      paint: { 'line-color': ['case', ['get', 'online'], '#3b6fe0', '#8a5cf0'], 'line-width': 4,
-               'line-dasharray': ['case', ['get', 'online'], ['literal', [1, 0]], ['literal', [2, 1.5]]] } });
+    m.addLayer({ id: 'plan-route-line', type: 'line', source: 'plan-route', filter: ['==', ['get', 'online'], true],
+      layout: { 'line-cap': 'round', 'line-join': 'round' }, paint: { 'line-color': '#3b6fe0', 'line-width': 4 } });
+    m.addLayer({ id: 'plan-route-line-off', type: 'line', source: 'plan-route', filter: ['!=', ['get', 'online'], true],
+      layout: { 'line-cap': 'round', 'line-join': 'round' }, paint: { 'line-color': '#8a5cf0', 'line-width': 4, 'line-dasharray': [2, 1.5] } });
     m.addSource('plan-user', { type: 'geojson', data: this._fc([]) });
     m.addLayer({ id: 'plan-user-halo', type: 'circle', source: 'plan-user', paint: { 'circle-radius': 14, 'circle-color': '#38d39f', 'circle-opacity': 0.25 } });
     m.addLayer({ id: 'plan-user-dot', type: 'circle', source: 'plan-user',
@@ -145,6 +145,8 @@ export class BerlinMap {
     if (!this.map) return;
     this._ensurePlanLayers();
     this.map.getSource('plan-user').setData(this._fc([{ type: 'Feature', properties: {}, geometry: { type: 'Point', coordinates: [lng, lat] } }]));
+    this._lastUser = [lng, lat];
+    if (this._follow) this._followTo(this._lastUser);
   }
 
   clearPlan() {
@@ -153,6 +155,90 @@ export class BerlinMap {
     if (!this.map || !this.map.getSource('plan-route')) return;
     this.map.getSource('plan-route').setData(this._fc([]));
     this.map.getSource('plan-user').setData(this._fc([]));
+  }
+
+
+  // ---- Phase 3: results pins, route line, follow-me, long-press ----
+  setResults(places, onClick) {
+    (this._resMarkers || []).forEach(mk => mk.remove());
+    this._resMarkers = [];
+    if (!this.map || !places?.length) return;
+    const gl = window.maplibregl;
+    places.forEach((p, i) => {
+      const el = document.createElement('button');
+      el.type = 'button'; el.title = p.name || '';
+      el.textContent = String(i + 1);
+      el.style.cssText = 'width:28px;height:28px;border-radius:50% 50% 50% 0;transform:rotate(-45deg);background:#ea5b5b;border:2px solid #fff;box-shadow:0 1px 5px rgba(0,0,0,.5);padding:0;cursor:pointer;color:#fff;font:700 12px/24px system-ui,sans-serif';
+      el.style.textIndent = '0';
+      el.addEventListener('click', (e) => { e.stopPropagation(); onClick?.(p, i); });
+      this._resMarkers.push(new gl.Marker({ element: el, anchor: 'bottom-left', offset: [14, -4] }).setLngLat([p.lng, p.lat]).addTo(this.map));
+    });
+  }
+
+  clearResults() { this.setResults([]); }
+
+  _ensureRouteLayers() {
+    const m = this.map;
+    if (!m || m.getSource('maps-route')) return;
+    m.addSource('maps-route', { type: 'geojson', data: this._fc([]) });
+    m.addLayer({ id: 'maps-route-casing', type: 'line', source: 'maps-route',
+      layout: { 'line-cap': 'round', 'line-join': 'round' }, paint: { 'line-color': '#fff', 'line-width': 9, 'line-opacity': 0.95 } });
+    m.addLayer({ id: 'maps-route-line', type: 'line', source: 'maps-route', filter: ['==', ['get', 'online'], true],
+      layout: { 'line-cap': 'round', 'line-join': 'round' }, paint: { 'line-color': '#1a73e8', 'line-width': 5 } });
+    m.addLayer({ id: 'maps-route-line-off', type: 'line', source: 'maps-route', filter: ['!=', ['get', 'online'], true],
+      layout: { 'line-cap': 'round', 'line-join': 'round' }, paint: { 'line-color': '#8a5cf0', 'line-width': 5, 'line-dasharray': [2, 1.5] } });
+  }
+
+  drawRoute(route, { fit = true } = {}) {
+    if (!this.map || !route?.line) return;
+    this._ensureRouteLayers();
+    this.map.getSource('maps-route').setData(this._fc([{ type: 'Feature', properties: { online: !!route.online }, geometry: route.line }]));
+    const cs = route.line.coordinates || [];
+    if (fit && cs.length) {
+      const b = cs.reduce((a, c) => [[Math.min(a[0][0], c[0]), Math.min(a[0][1], c[1])], [Math.max(a[1][0], c[0]), Math.max(a[1][1], c[1])]],
+        [[cs[0][0], cs[0][1]], [cs[0][0], cs[0][1]]]);
+      this.map.fitBounds(b, { padding: { top: 120, bottom: Math.round(innerHeight * 0.5), left: 40, right: 40 }, maxZoom: 17, duration: 600 });
+    }
+  }
+
+  clearRoute() {
+    if (this.map?.getSource('maps-route')) this.map.getSource('maps-route').setData(this._fc([]));
+  }
+
+  // follow(true): camera tracks showUser() fixes until the user drags the map (then onFollowChange(false)).
+  follow(on) {
+    this._follow = !!on;
+    const m = this.map;
+    if (m && !this._followHooked) {
+      this._followHooked = true;
+      m.on('dragstart', (e) => { if (this._follow && e.originalEvent) { this._follow = false; this.onFollowChange?.(false); } });
+    }
+    if (on && this._lastUser) this._followTo(this._lastUser);
+    this.onFollowChange?.(this._follow);
+  }
+
+  _followTo([lng, lat]) {
+    this.map?.easeTo({ center: [lng, lat], zoom: Math.max(this.map.getZoom(), 17), duration: 700 });
+  }
+
+  // long-press (~600 ms, no movement) → cb({ lng, lat })
+  onLongPress(cb) {
+    this._lpCb = cb;
+    const m = this.map;
+    if (!m || this._lpHooked) return;
+    this._lpHooked = true;
+    let timer = null;
+    const cancel = () => { clearTimeout(timer); timer = null; };
+    m.on('touchstart', (e) => {
+      if (e.points && e.points.length > 1) return cancel();
+      cancel();
+      timer = setTimeout(() => { timer = null; this._lpCb?.({ lng: e.lngLat.lng, lat: e.lngLat.lat }); }, 600);
+    });
+    m.on('mousedown', (e) => {
+      cancel();
+      timer = setTimeout(() => { timer = null; this._lpCb?.({ lng: e.lngLat.lng, lat: e.lngLat.lat }); }, 600);
+    });
+    ['touchend', 'touchcancel', 'mouseup', 'movestart', 'dragstart', 'zoomstart'].forEach(ev => m.on(ev, cancel));
   }
 
   hide() {

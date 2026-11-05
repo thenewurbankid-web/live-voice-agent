@@ -36,11 +36,14 @@ export class Navigator {
   }
 
   static here() {
+    if (Navigator._last && Date.now() - Navigator._last.t < 60000) return Promise.resolve(Navigator._last.p);
     return new Promise((resolve) => {
       if (!globalThis.navigator?.geolocation) return resolve(null);
+      const done = (p) => { if (p) Navigator._last = { p, t: Date.now() }; resolve(p); };
+      setTimeout(() => resolve(null), 6000); // a pending permission prompt never times out on its own
       navigator.geolocation.getCurrentPosition(
-        (p) => resolve({ lng: p.coords.longitude, lat: p.coords.latitude }), () => resolve(null),
-        { enableHighAccuracy: true, timeout: 8000 });
+        (p) => done({ lng: p.coords.longitude, lat: p.coords.latitude }), () => resolve(null),
+        { enableHighAccuracy: true, timeout: 6000, maximumAge: 30000 });
     });
   }
 }

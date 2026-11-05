@@ -649,18 +649,26 @@ async function openMap() {
   } catch (e) { prog.textContent = 'Map unavailable: ' + (e.message || e); berlin = null; }
 }
 // ---------- Google-Maps-like screen (offline search, directions, plans) ----------
-let mapsUI;
+let mapsUI, mapsFit;
 async function openMaps(opts = {}) {
-  $('mapsRoot').classList.remove('hidden');
+  $('mapsMap').classList.remove('hidden');
+  setTimeout(() => mapsFit?.(), 50);
   if (!mapsUI) {
     const [{ MapsUI }, { BerlinMap }, planner] = await Promise.all([import('./maps-ui.js'), import('./map.js'), import('./planner.js')]);
     const m = new BerlinMap($('mapsMap'));
     await m.ensureOffline(() => {});
     await m.show();
+    const fit = () => m.map?.resize();
+    setTimeout(fit, 50); setTimeout(fit, 600); addEventListener('resize', fit);
+    mapsFit = fit;
     await places.load();
-    mapsUI = new MapsUI($('mapsRoot'), {
+    // keep the map layer visible exactly while the Maps overlay is open
+    new MutationObserver(() => $('mapsMap').classList.toggle('hidden', $('maps').classList.contains('hidden')))
+      .observe($('maps'), { attributes: true, attributeFilter: ['class'] });
+    mapsUI = new MapsUI($('maps'), {
       map: m, places, route, Navigator, plans, planner,
       openPlans: (v) => openPlans(v), getOnline, speak: (t) => voice?.say(t),
+      onMic: () => { $('maps').classList.add('hidden'); },
     });
     try { (await import('./offline-router.js')).ensureGraph(() => {}).catch(() => {}); } catch {}
   }

@@ -115,3 +115,9 @@ export async function moveStop(plan, from, to, deps) {
   stops.splice(to, 0, s);
   return recompute(plan, stops, deps);
 }
+export async function addStop(plan, place, index = plan.stops.length, deps) {
+  const stops = plan.stops.slice();
+  const i = Math.max(0, Math.min(index ?? stops.length, stops.length));
+  stops.splice(i, 0, { place, arrive: '', leave: '', done: false });
+  return recompute(plan, stops, deps);
+}

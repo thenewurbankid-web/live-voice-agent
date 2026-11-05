@@ -1,0 +1,18 @@
+<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<style>:root{--bg:#0b0d12;--panel:#151922;--ink:#f2f4f8;--mute:#9aa3b2;--line:#252b37;--accent:#7aa2ff;--ok:#38d39f;--bad:#ff6b6b}html,body{margin:0;height:100%;background:var(--bg);color:var(--ink)}.hidden{display:none!important}#map{position:fixed;inset:0}#maps{position:fixed;inset:0}</style>
+<div id="map"></div><div id="maps"></div>
+<script type="module">
+import { BerlinMap } from './js/map.js';
+import { Places } from './js/places.js';
+import { route } from './js/routing.js';
+import { Navigator } from './js/navigator.js';
+import { PlansStore } from './js/plans-store.js';
+import { buildPlan, replaceStop, removeStop, moveStop, addStop } from './js/planner.js';
+import { MapsUI } from './js/maps-ui.js';
+const ui = new MapsUI(document.getElementById('maps'), {
+  map: new BerlinMap(document.getElementById('map')), places: new Places(), route, Navigator, plans: new PlansStore(),
+  planner: { buildPlan, replaceStop, removeStop, moveStop, addStop }, openPlans: v => console.log('openPlans', v),
+  getOnline: () => navigator.onLine, speak: t => console.log('speak', t) });
+window.ui = ui;
+try { await ui.open({ query: 'bars in Kreuzberg' }); window.__done = true; } catch (e) { console.error('open failed', e); window.__err = String(e); }
+</script>

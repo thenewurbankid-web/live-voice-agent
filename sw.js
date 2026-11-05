@@ -1,7 +1,7 @@
 // App-shell + CDN cache so the app starts with no network after the first visit.
 // Model weights are cached by WebLLM / transformers.js themselves (Cache API), and the
 // Berlin tiles by js/map.js, so they are deliberately not duplicated here.
-const SHELL = 'live-shell-v7';
+const SHELL = 'live-shell-v8';
 const CDN = 'live-cdn-v1';
 const SHELL_FILES = [
   './', 'index.html', 'manifest.webmanifest', 'icon.svg', 'icon-192.png', 'icon-512.png',
@@ -25,7 +25,7 @@ self.addEventListener('fetch', (e) => {
   if (url.origin === location.origin) {
     if (url.pathname.endsWith('.pmtiles') || url.pathname.endsWith('.bin')) return; // map.js stores it itself
     // Network first for the shell so updates land; cache when offline.
-    e.respondWith(fetch(req).then((res) => {
+    e.respondWith(fetch(req, { cache: 'no-cache' }).then((res) => {
       if (res.ok) { const copy = res.clone(); caches.open(SHELL).then((c) => c.put(req, copy)); }
       return res;
     }).catch(() => caches.match(req, { ignoreSearch: true }).then((r) => r || caches.match('index.html'))));
