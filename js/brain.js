@@ -20,9 +20,15 @@ const SYSTEM = [
   'Your replies are spoken aloud: answer in 1 to 3 short sentences, plain spoken English, no markdown, no lists, no emoji.',
 ].join(' ');
 
+const DEAD = /disposed|device (was )?lost|GPUDevice|out of memory|OperationError/i;
+const CRASH_MSG = "My brain crashed on this phone's graphics chip, so I'm restarting it with a smaller model. Ask me again in a moment.";
+
 export class Brain {
   constructor(key, profile) {
     this.cfg = BRAINS.find((b) => b.key === key) || BRAINS.find((b) => b.key === defaultBrainKey(profile));
+    // Phones: a desktop-only model (Phi-3.5 Vision, ~4 GB) crashes the GPU ("Object has already been disposed").
+    // Swap to the phone default instead of letting a remembered desktop choice break every reply.
+    if (profile?.mobile && !this.cfg.mobileOk) { this.swappedFrom = this.cfg.label; this.cfg = BRAINS.find((b) => b.key === defaultBrainKey(profile)); }
     this.profile = profile || {};
     this.engine = null;
     this.history = [];
@@ -30,10 +36,24 @@ export class Brain {
   }
 
   get vision() { return this.cfg.vision; }
+  get label() { return this.cfg.label; }
+
+  // GPU lost / engine disposed: rebuild the engine once, falling back to the smallest model on phones.
+  async recover() {
+    if (this.recovering) return this.recovering;
+    this.recovering = (async () => {
+      try { await this.engine?.unload?.(); } catch {}
+      try { this.worker?.terminate(); } catch {}
+      if (this.profile.mobile && this.cfg.key !== 'qwen0.5') this.cfg = BRAINS.find((b) => b.key === 'qwen0.5');
+      this.active = null; this.tail = Promise.resolve();
+      await this.load(() => {});
+    })().finally(() => { this.recovering = null; });
+    return this.recovering;
+  }
 
   async load(onProgress) {
     const id = this.profile.f16 === false ? this.cfg.idF32 : this.cfg.id;
-    const worker = new Worker(new URL('./llm-worker.js', import.meta.url), { type: 'module' });
+    const worker = this.worker = new Worker(new URL('./llm-worker.js', import.meta.url), { type: 'module' });
     this.engine = await CreateWebWorkerMLCEngine(worker, id, {
       initProgressCallback: (r) => onProgress && onProgress(Math.min(0.97, r.progress ?? 0), r.text || 'Loading language model'),
     });
@@ -64,6 +84,7 @@ export class Brain {
     }
     if (!superseded) await Promise.race([prev, new Promise((r) => setTimeout(r, 3000))]);
     let stream = null;
+    if (this.recovering) { release(); yield 'Still restarting my brain, one moment.'; return; }
     try {
       const userText = scene ? `Camera view: ${scene}\n${text}` : text;
       const content = image && this.vision
@@ -79,7 +100,14 @@ export class Brain {
         if (this.cfg.qwen3) req.extra_body = { enable_thinking: false };
         return this.engine.chat.completions.create(req);
       };
-      try { stream = await run(false); } catch { stream = await run(true); }
+      try { stream = await run(false); } catch (e) {
+        if (DEAD.test(String(e?.message || e))) {
+          yield CRASH_MSG;
+          this.recover().catch(() => {});
+          return;
+        }
+        stream = await run(true);
+      }
       this.active = stream;
 
       let full = '', raw = '', emitted = 0, done = false;
@@ -108,6 +136,10 @@ export class Brain {
       if (this.active === stream) this.active = null;
       this.history.push({ role: 'user', content: userText }, { role: 'assistant', content: full });
       this.history = this.history.slice(-8);
+    } catch (e) {
+      if (!DEAD.test(String(e?.message || e))) throw e;
+      yield CRASH_MSG;                       // crashed mid-answer: recover instead of failing every later turn
+      this.recover().catch(() => {});
     } finally {
       release();
     }
