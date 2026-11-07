@@ -93,8 +93,14 @@ let brain, ears, voice, eyes, translator, audioCtx, micStream, micAnalyser;
 let state = 'idle', turn = 0, micOn = true, mode = 'chat', bargeIn = true;
 const history = [];
 
+let thinkT = null;
 function setState(s) {
   state = s;
+  clearInterval(thinkT);
+  if (s === 'thinking') {             // live seconds counter, so a slow phone shows progress instead of looking frozen
+    const t0 = Date.now();
+    thinkT = setInterval(() => { if (state === 'thinking') $('status').textContent = `Thinking ${Math.round((Date.now() - t0) / 1000)}s`; }, 1000);
+  }
   $('call').dataset.state = s;
   $('status').textContent = {
     listening: micOn ? 'Listening' : 'Mic muted',
@@ -194,7 +200,8 @@ async function respond(text, my) {
   lastAudio = null;
   if (await handleIntent(text, my)) return;
   const asked = text;
-  const mem = [memory.context(), await graphCtx].filter(Boolean).join('\n');
+  let mem = [memory.context(), await graphCtx].filter(Boolean).join('\n');
+  if (profile.mobile && mem.length > 700) mem = mem.slice(0, 700); // phones: keep the prompt short
   if (mem) text += '\n\n(' + mem + ')';
   if (my !== turn) return;
   let sources = null;
@@ -229,6 +236,7 @@ async function respond(text, my) {
     for await (const d of brain.reply(text, { image, scene })) {
       lastTok = Date.now();
       if (my !== turn) break;
+      if (!shown) setState('speaking');
       shown += d; buf += d; caption('agent', shown);
       const cut = cutPoint(buf, first);
       if (cut > 0) { voice.say(buf.slice(0, cut)); buf = buf.slice(cut); first = false; setState('speaking'); }

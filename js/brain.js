@@ -35,31 +35,52 @@ export class Brain {
     const id = this.profile.f16 === false ? this.cfg.idF32 : this.cfg.id;
     const worker = new Worker(new URL('./llm-worker.js', import.meta.url), { type: 'module' });
     this.engine = await CreateWebWorkerMLCEngine(worker, id, {
-      initProgressCallback: (r) => onProgress && onProgress(r.progress ?? 0, r.text || 'Loading language model'),
+      initProgressCallback: (r) => onProgress && onProgress(Math.min(0.97, r.progress ?? 0), r.text || 'Loading language model'),
     });
+    // Warm-up: the first generation compiles GPU kernels (tens of seconds on phones). Do it now, while the
+    // loading screen is up, so the user's first question doesn't sit on "Thinking".
+    onProgress && onProgress(0.98, 'Warming up the brain (first time is slowest)');
+    try {
+      await Promise.race([
+        this.engine.chat.completions.create({ messages: [{ role: 'user', content: 'Hi' }], max_tokens: 2, ...(this.cfg.qwen3 ? { extra_body: { enable_thinking: false } } : {}) }),
+        new Promise((r) => setTimeout(r, 90000)),
+      ]);
+    } catch {}
+    try { await this.engine.resetChat(); } catch {}
+    onProgress && onProgress(1, 'Brain ready');
   }
 
   async *reply(text, { image = null, scene = null } = {}) {
     const prev = this.tail;
     let release;
     this.tail = new Promise((r) => (release = r));
-    await prev;
+    // A new question supersedes any unfinished answer: stop it and drain its stream, or the engine stays
+    // locked by a half-read stream and every later reply sits on "Thinking" (seen on phones).
+    const superseded = !!this.active;
+    if (this.active) {
+      const old = this.active; this.active = null;
+      try { this.engine.interruptGenerate(); } catch {}
+      await Promise.race([(async () => { try { for await (const _ of old) { /* drain */ } } catch {} })(), new Promise((r) => setTimeout(r, 1500))]);
+    }
+    if (!superseded) await Promise.race([prev, new Promise((r) => setTimeout(r, 3000))]);
     let stream = null;
     try {
       const userText = scene ? `Camera view: ${scene}\n${text}` : text;
       const content = image && this.vision
         ? [{ type: 'image_url', image_url: { url: image } }, { type: 'text', text: userText }]
         : userText;
-      const past = this.history.slice(-8);
+      const mobile = this.profile.mobile;
+      const past = this.history.slice(mobile ? -4 : -8);      // phones: shorter prompt = much faster first word
       const run = (fold) => {
         const msgs = fold
           ? [...past, { role: 'user', content: typeof content === 'string' ? `${SYSTEM}\n\n${content}` : [...content.slice(0, -1), { type: 'text', text: `${SYSTEM}\n\n${userText}` }] }]
           : [{ role: 'system', content: SYSTEM }, ...past, { role: 'user', content }];
-        const req = { messages: msgs, stream: true, max_tokens: 200, temperature: 0.7 };
+        const req = { messages: msgs, stream: true, max_tokens: mobile ? 120 : 200, temperature: 0.7 };
         if (this.cfg.qwen3) req.extra_body = { enable_thinking: false };
         return this.engine.chat.completions.create(req);
       };
       try { stream = await run(false); } catch { stream = await run(true); }
+      this.active = stream;
 
       let full = '', raw = '', emitted = 0, done = false;
       try {
@@ -84,6 +105,7 @@ export class Brain {
         if (!done) this.engine.interruptGenerate();
         try { for await (const _ of stream) { /* drain */ } } catch { /* ignore */ }
       }
+      if (this.active === stream) this.active = null;
       this.history.push({ role: 'user', content: userText }, { role: 'assistant', content: full });
       this.history = this.history.slice(-8);
     } finally {
