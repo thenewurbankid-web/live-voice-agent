@@ -16,11 +16,13 @@ import { Memory } from './memory.js';
 import { Sounds, describeSounds } from './sounds.js';
 import { Aware } from './aware.js';
 import { GraphMemory } from './graph-memory.js';
+// Cap every startup wait so a slow phone never blocks the UI from wiring its buttons.
+const within = (p, ms) => Promise.race([p, new Promise((_, no) => setTimeout(() => no(new Error('timeout')), ms))]);
 const graph = new GraphMemory();
-await graph.load().catch(() => { graph.events = []; graph.index = new Map(); graph.byId = new Map(); });
+await within(graph.load(), 3000).catch(() => { graph.events = []; graph.index = new Map(); graph.byId = new Map(); });
 let sounds = null, aware = null, soundBefore = null, lastSpeechAt = 0, recorder = null;
 const memory = new Memory();
-await memory.load().catch(() => { memory.facts = []; memory.turns = []; });
+await within(memory.load(), 3000).catch(() => { memory.facts = []; memory.turns = []; });
 let lastAudio = null;
 
 const $ = (id) => document.getElementById(id);
@@ -34,7 +36,7 @@ async function detectProfile() {
   const mobile = matchMedia('(pointer:coarse)').matches || /Android|iPhone|iPad|Mobile/i.test(navigator.userAgent);
   let webgpu = false, f16 = false;
   try {
-    const adapter = await navigator.gpu?.requestAdapter();
+    const adapter = navigator.gpu ? await within(navigator.gpu.requestAdapter(), 2500) : null;
     webgpu = !!adapter; f16 = !!adapter?.features.has('shader-f16');
   } catch {}
   return { mobile, webgpu, f16 };
