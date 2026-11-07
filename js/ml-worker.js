@@ -3,7 +3,7 @@
 import * as Comlink from 'https://cdn.jsdelivr.net/npm/comlink@4.4.2/+esm';
 const TRANSFORMERS = 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.5.1/+esm';
 const KOKORO = 'https://cdn.jsdelivr.net/npm/kokoro-js@1.2.1/+esm';
-let asr, tts;
+let asr, tts, emb;
 
 Comlink.expose({
   async loadAsr(model, opts, onProgress) {
@@ -13,6 +13,11 @@ Comlink.expose({
   async transcribe(audio, o) {
     const out = await asr(audio, o);
     return (Array.isArray(out) ? out[0]?.text : out?.text) || '';
+  },
+  async embed(text) {
+    if (!emb) { const { pipeline } = await import(TRANSFORMERS); emb = await pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2', { dtype: 'q8', device: 'wasm' }); }
+    const t = await emb(text, { pooling: 'mean', normalize: true });
+    return Array.from(t.data, (x) => Math.round(x * 1e4) / 1e4);
   },
   async loadTts(id, opts, onProgress) {
     const { KokoroTTS } = await import(KOKORO);

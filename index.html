@@ -70,6 +70,8 @@ select{background:#0f1218;border:1px solid var(--line);border-radius:12px;paddin
 .cap.you{color:#cfd6e4;font-size:15px}
 .cap.you::before{content:"You  ";color:var(--mute);font-size:12px}
 .cap.tr{color:#ffd166;font-size:15px}
+.cap.src{display:flex;flex-wrap:wrap;gap:6px;font-size:13px;text-shadow:none}
+.cap.src a{color:#cfe3ff;background:#ffffff1a;border-radius:999px;padding:4px 10px;text-decoration:none;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 form.type{position:relative;display:flex;gap:8px;padding:0 16px 10px}
 form.type input{flex:1;min-width:0;background:#000a;border:1px solid #ffffff26;border-radius:99px;padding:12px 16px;font-size:16px}
 form.type button{border:0;border-radius:99px;padding:0 16px;background:#ffffff1f}
@@ -144,6 +146,7 @@ form.type button{border:0;border-radius:99px;padding:0 16px;background:#ffffff1f
     <button class="cbtn hidden" id="seeBtn" aria-label="Translate what I see"><svg viewBox="0 0 24 24"><path d="M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg></button>
     <button class="cbtn" id="mapBtn" aria-label="Berlin map"><svg viewBox="0 0 24 24"><path d="M9 4 3 6v14l6-2 6 2 6-2V4l-6 2z"/><path d="M9 4v14M15 6v14"/></svg></button>
     <button class="cbtn" id="planBtn" aria-label="Plans"><svg viewBox="0 0 24 24"><path d="M12 21s-7-6.3-7-11a7 7 0 0 1 14 0c0 4.7-7 11-7 11z"/><circle cx="12" cy="10" r="2.5"/></svg></button>
+    <button class="cbtn off" id="researchBtn" aria-label="Research mode on/off"><svg viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"/><path d="M15.5 15.5 21 21M8 10.5h5M10.5 8v5"/></svg></button>
     <button class="cbtn on" id="webBtn" aria-label="Web access on/off"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c3 3.5 3 14.5 0 18M12 3c-3 3.5-3 14.5 0 18"/></svg></button>
     <button class="cbtn" id="logBtn" aria-label="Transcript"><svg viewBox="0 0 24 24"><path d="M4 5h16M4 10h16M4 15h10"/></svg></button>
     <button class="cbtn end" id="endBtn" aria-label="End"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg></button>

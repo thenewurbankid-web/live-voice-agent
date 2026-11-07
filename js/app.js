@@ -112,6 +112,14 @@ function caption(kind, text) {
   }
   el.textContent = text;
 }
+// Research sources as tappable links under the answer.
+function showSources(list) {
+  const box = $('captions'), el = document.createElement('div');
+  el.className = 'cap src';
+  for (const x of list) { const a = Object.assign(document.createElement('a'), { href: x.url, target: '_blank', rel: 'noopener', textContent: `[${x.n}] ${x.title}` }); el.append(a); }
+  box.append(el);
+  while (box.children.length > 4) box.firstChild.remove();
+}
 function logLine(who, text, extra = {}) {
   history.push({ who, text });
   memory.addTurn(who, text, extra).catch(() => {});
@@ -179,15 +187,25 @@ function cutPoint(s, first) {
 }
 
 async function respond(text, my) {
-  const graphCtx = graph.contextFor(text).catch(() => '');
+  const graphCtx = within(graph.contextFor(text), 1200).catch(() => ''); // memory helps, but never holds up a reply
   caption('you', text);
   logLine('You', text, { image: eyes?.enabled ? eyes.snapshot(448) : null, audio: lastAudio });
   lastAudio = null;
   if (await handleIntent(text, my)) return;
+  const asked = text;
   const mem = [memory.context(), await graphCtx].filter(Boolean).join('\n');
   if (mem) text += '\n\n(' + mem + ')';
   if (my !== turn) return;
-  if (getOnline() && needsWeb(text)) {
+  let sources = null;
+  if (researchOn || RESEARCH_RE.test(asked)) {
+    if (!getOnline()) { say('Research needs the internet. Turn on web access and ask again.', my); return; }
+    setState('thinking');
+    const { research, researchPrompt } = await import('./research.js');
+    const r = await research(asked, { onStep: (s) => { if (my === turn) caption('agent', s + '…'); } }).catch(() => null);
+    if (my !== turn) return;
+    if (!r?.notes.length) { say("I couldn't find anything solid on that. Try different words?", my); return; }
+    text = researchPrompt(text, r); sources = r.sources;
+  } else if (getOnline() && needsWeb(text)) {
     setState('thinking');
     const hits = await webSearch(text, { limit: 3 }).catch(() => []);
     if (my !== turn) return;
@@ -202,9 +220,12 @@ async function respond(text, my) {
     if (my !== turn) return;
   }
   setState('thinking');
-  let shown = '', buf = '', first = true;
+  let shown = '', buf = '', first = true, lastTok = Date.now();
+  // Watchdog: if the brain produces nothing for 60 s, cancel and go back to listening instead of "Thinking" forever.
+  const dog = setInterval(() => { if (my === turn && Date.now() - lastTok > 60000) { clearInterval(dog); try { brain.interrupt(); } catch {} caption('agent', '⚠️ That took too long, so I stopped. Try again, or pick a smaller brain on the start screen.'); setState('listening'); } }, 3000);
   try {
     for await (const d of brain.reply(text, { image, scene })) {
+      lastTok = Date.now();
       if (my !== turn) break;
       shown += d; buf += d; caption('agent', shown);
       const cut = cutPoint(buf, first);
@@ -212,10 +233,11 @@ async function respond(text, my) {
     }
   } catch (e) {
     if (my === turn) caption('agent', '⚠️ ' + (e.message || e));
-  }
+  } finally { clearInterval(dog); }
   if (my !== turn) return;
   if (buf.trim()) { voice.say(buf); setState('speaking'); }
   if (shown) logLine('AI', shown);
+  if (sources) { showSources(sources); logLine('AI', 'Sources: ' + sources.map((x) => `[${x.n}] ${x.title} ${x.url}`).join(' · ')); }
   await voice.drain();
   if (my === turn) setState('listening');
 }
@@ -236,6 +258,9 @@ async function onTyped(text) {
 
 // ---------- planner + places (deterministic; the LLM never invents places) ----------
 let webOn = true;
+// Research mode: on = every question is researched (search → read sources → answer with citations).
+const RESEARCH_RE = /^(please\s+)?(can you\s+)?(do (a|some)\s+)?(research|look into|dig into|deep dive|find out about|read up on|recherchiere)\b/i;
+let researchOn = false;
 const getOnline = () => webOn && navigator.onLine;
 const places = new Places();
 const plans = new PlansStore();
@@ -574,6 +599,9 @@ async function enterCall() {
   if (mode === 'chat' && $('useAware').checked) startAware();
   if ($('useRec').checked) startRecording();
   $('webBtn').classList.toggle('on', webOn); $('webBtn').classList.toggle('off', !webOn);
+  researchOn = mode === 'chat' && store.get('research', false);
+  $('researchBtn').classList.toggle('hidden', mode !== 'chat');
+  $('researchBtn').classList.toggle('on', researchOn); $('researchBtn').classList.toggle('off', !researchOn);
   try { await navigator.wakeLock?.request('screen'); } catch {}
   await ears.start();
   setState('listening');
@@ -615,6 +643,8 @@ $('seeBtn').onclick = async () => {
 $('flipBtn').onclick = () => eyes?.flip().then(restartRecording).catch(() => {});
 $('planBtn').onclick = () => openPlans('active').catch((e) => caption('agent', 'Planner unavailable: ' + e.message));
 $('openPlan').onclick = () => openPlans('new').catch((e) => { $('err').textContent = 'Planner unavailable: ' + e.message; $('err').classList.remove('hidden'); });
+$('researchBtn').onclick = () => { researchOn = !researchOn; store.set('research', researchOn); $('researchBtn').classList.toggle('on', researchOn); $('researchBtn').classList.toggle('off', !researchOn);
+  caption('tr', researchOn ? 'Research mode on: I search, read the sources and answer with citations.' : 'Research mode off'); };
 $('webBtn').onclick = () => { webOn = !webOn; store.set('useWeb', webOn); $('webBtn').classList.toggle('on', webOn); $('webBtn').classList.toggle('off', !webOn); caption('tr', webOn ? 'Web access on' : 'Offline only'); };
 $('logBtn').onclick = () => {
   const log = $('log'); log.innerHTML = '';

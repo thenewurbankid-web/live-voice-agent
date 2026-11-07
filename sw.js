@@ -1,11 +1,11 @@
 // App-shell + CDN cache so the app starts with no network after the first visit.
 // Model weights are cached by WebLLM / transformers.js themselves (Cache API), and the
 // Berlin tiles by js/map.js, so they are deliberately not duplicated here.
-const SHELL = 'live-shell-v10';
+const SHELL = 'live-shell-v12';
 const CDN = 'live-cdn-v1';
 const SHELL_FILES = [
   './', 'index.html', 'manifest.webmanifest', 'icon.svg', 'icon-192.png', 'icon-512.png',
-  'js/app.js', 'js/brain.js', 'js/llm-worker.js', 'js/ml-worker.js', 'js/ears.js', 'js/voice.js', 'js/eyes.js', 'js/translate.js', 'js/map.js', 'js/ocr.js', 'js/web.js', 'js/routing.js', 'js/navigator.js', 'js/places.js', 'js/planner.js', 'js/plans-store.js', 'js/plan-ui.js', 'js/memory.js', 'js/sounds.js', 'js/aware.js', 'js/graph-memory.js', 'js/maps-ui.js', 'js/offline-router.js', 'js/router-worker.js', 'js/router-core.js', 'data/berlin-pois.json',
+  'js/app.js', 'js/brain.js', 'js/llm-worker.js', 'js/ml-worker.js', 'js/ears.js', 'js/voice.js', 'js/eyes.js', 'js/translate.js', 'js/map.js', 'js/ocr.js', 'js/web.js', 'js/research.js', 'js/routing.js', 'js/navigator.js', 'js/places.js', 'js/planner.js', 'js/plans-store.js', 'js/plan-ui.js', 'js/memory.js', 'js/sounds.js', 'js/aware.js', 'js/graph-memory.js', 'js/maps-ui.js', 'js/offline-router.js', 'js/router-worker.js', 'js/router-core.js', 'data/berlin-pois.json',
 ];
 const CDN_HOSTS = ['cdn.jsdelivr.net', 'protomaps.github.io', 'raw.githubusercontent.com', 'storage.googleapis.com'];
 

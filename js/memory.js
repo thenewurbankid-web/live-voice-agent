@@ -68,7 +68,11 @@ export class Memory {
   async remember(fact) { this.facts.push({ at: new Date().toISOString(), text: fact }); await this._save(); }
 
   // ---- continuous conversation recordings (MediaRecorder chunks) ----
-  async addChunk(sessionId, blob, mime) {
+  // Chunks arrive every few seconds; saves run one at a time so they never overwrite each other's index.
+  addChunk(sessionId, blob, mime) {
+    return (this.recQ = (this.recQ || Promise.resolve()).then(() => this._addChunk(sessionId, blob, mime)).catch(() => {}));
+  }
+  async _addChunk(sessionId, blob, mime) {
     const { get, set, del } = await db();
     const recs = (await get('mem:recs')) || [];           // [{ id, start, mime, chunks: n, bytes }]
     let r = recs.find((x) => x.id === sessionId);

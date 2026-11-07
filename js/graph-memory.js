@@ -2,7 +2,7 @@
 // (compromise.js NLP), and semantic retrieval (MiniLM embeddings via transformers.js). Stored in IndexedDB.
 const IDB = 'https://cdn.jsdelivr.net/npm/idb-keyval@6.3.0/+esm';
 const NLP = 'https://cdn.jsdelivr.net/npm/compromise@14.19.0/+esm';
-const TRANSFORMERS = 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.5.1/+esm';
+const COMLINK = 'https://cdn.jsdelivr.net/npm/comlink@4.4.2/+esm';
 const MAX_EVENTS = 5000;
 const STOP = new Set(['i', 'you', 'me', 'it', 'that', 'this', 'thing', 'things', 'something', 'image', 'picture', 'camera', 'time', 'way', 'lot']);
 
@@ -19,14 +19,12 @@ export class GraphMemory {
     return this;
   }
 
-  async _embedder() {
-    if (this.embedP) return this.embedP;
-    this.embedP = import(TRANSFORMERS).then(({ pipeline }) => pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2', { dtype: 'q8', device: 'wasm' }));
-    return this.embedP;
+  // MiniLM runs in its own Web Worker so embedding never freezes the screen.
+  async _worker() {
+    return (this.workerP ||= import(COMLINK).then((C) => C.wrap(new Worker(new URL('./ml-worker.js', import.meta.url), { type: 'module' }))));
   }
   async _embed(text) {
-    try { const f = await this._embedder(); const t = await f(text, { pooling: 'mean', normalize: true }); return Array.from(t.data, (x) => Math.round(x * 1e4) / 1e4); }
-    catch { return null; }
+    try { return await (await this._worker()).embed(text); } catch { return null; }
   }
 
   async _entities(text) {
