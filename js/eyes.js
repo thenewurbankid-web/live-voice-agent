@@ -1,7 +1,5 @@
-// Eyes: camera + SmolVLM-256M captioner (for brains that cannot take images directly).
-const TF_URL = 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.5.1/+esm';
-const MODEL_ID = 'HuggingFaceTB/SmolVLM-256M-Instruct';
-const PROMPT = 'Describe what you see in one short sentence.';
+// Eyes: camera + SmolVLM-256M captioner (for brains that cannot take images directly), captioning off-thread.
+import { getMlWorker, progress } from './ml.js';
 
 export class Eyes {
   constructor(videoEl) {
@@ -9,9 +7,9 @@ export class Eyes {
     this.stream = null;
     this.facing = 'user';
     this._enabled = true;
-    this.tf = null;
-    this.processor = null;
-    this.model = null;
+    this.ml = null;
+    this.lite = false;
+    this.captionerReady = false;
     this.canvas = document.createElement('canvas');
   }
 
@@ -54,39 +52,15 @@ export class Eyes {
     return this.canvas.toDataURL('image/jpeg', 0.8);
   }
 
+  // SmolVLM runs in the shared ML worker: the main thread only sends the frame (data URL or Blob).
   async loadCaptioner(profile, onProgress = () => {}) {
-    this.tf = await import(TF_URL);
-    const { AutoProcessor, AutoModelForVision2Seq } = this.tf;
-    const files = new Map();
-    const progress_callback = (p) => {
-      if (p.status === 'progress' && p.total) {
-        files.set(p.file, { loaded: p.loaded, total: p.total });
-        let l = 0, t = 0;
-        for (const f of files.values()) { l += f.loaded; t += f.total; }
-        onProgress(t ? l / t : 0, 'Loading vision model');
-      }
-    };
-    this.processor = await AutoProcessor.from_pretrained(MODEL_ID, { progress_callback });
-    this.model = await AutoModelForVision2Seq.from_pretrained(MODEL_ID, {
-      dtype: { embed_tokens: 'fp16', vision_encoder: 'q4', decoder_model_merged: 'q4' },
-      device: profile && profile.webgpu ? 'webgpu' : 'wasm',
-      progress_callback,
-    });
+    this.ml = getMlWorker();
+    await this.ml.loadCaptioner({ device: profile && profile.webgpu ? 'webgpu' : 'wasm' }, progress(onProgress));
     onProgress(1, 'Vision model ready');
   }
 
-  async describe(dataUrl) {
-    if (!this.model || !dataUrl) return '';
-    const { RawImage } = this.tf;
-    const image = await RawImage.fromURL(dataUrl);
-    const messages = [{ role: 'user', content: [{ type: 'image' }, { type: 'text', text: PROMPT }] }];
-    const text = this.processor.apply_chat_template(messages, { add_generation_prompt: true });
-    const inputs = await this.processor(text, [image], { do_image_splitting: false });
-    const out = await this.model.generate({ ...inputs, max_new_tokens: 48 });
-    const [caption] = this.processor.batch_decode(
-      out.slice(null, [inputs.input_ids.dims.at(-1), null]),
-      { skip_special_tokens: true },
-    );
-    return (caption || '').trim();
+  async describe(frame) {
+    if (!this.ml || !frame) return '';
+    return this.ml.caption(frame);
   }
 }

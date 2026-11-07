@@ -20,7 +20,8 @@ async function fetchBin(onProgress) {
   const buf = new Uint8Array(got);
   let o = 0;
   for (const c of chunks) { buf.set(c, o); o += c.length; }
-  await cache?.put(URL_BIN, new Response(buf.slice().buffer)).catch(() => {});
+  // new Response(buf) copies the bytes at construction, so transferring buf.buffer to the worker afterwards is safe.
+  await cache?.put(URL_BIN, new Response(buf)).catch(() => {});
   return buf.buffer;
 }
 

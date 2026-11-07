@@ -1,9 +1,12 @@
-// Ears: Silero VAD (global `vad`) + Whisper (transformers.js) composed together.
-const COMLINK = 'https://cdn.jsdelivr.net/npm/comlink@4.4.2/+esm';
+// Ears: Silero VAD (global `vad`) + Whisper (transformers.js, in the shared ML worker) composed together.
+import { getMlWorker, progress } from './ml.js';
 const VAD_BASE = 'https://cdn.jsdelivr.net/npm/@ricky0123/vad-web@0.0.31/dist/';
 const ORT_BASE = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/';
 
-const HALLUCINATIONS = new Set(['thank you', 'thanks for watching', 'you', 'bye', 'the end']);
+// Whisper's stock outputs on silence / noise, compared against the lowercased transcript with punctuation stripped.
+const HALLUCINATIONS = new Set(['thank you for watching', 'thanks for watching', 'thank you', 'thanks', 'please subscribe', 'subscribe',
+  'like and subscribe', 'see you next time', 'bye bye', 'bye', 'you', 'the end', 'so', 'okay']);
+const MIN_SAMPLES = 8000; // 0.5 s at 16 kHz (VAD output rate)
 
 export class Ears {
   constructor({ onSpeechStart, onUtterance }) {
@@ -14,8 +17,7 @@ export class Ears {
   }
 
   async load(micStream, profile, onProgress = () => {}) {
-    const Comlink = await import(COMLINK);
-    this.worker = Comlink.wrap(new Worker(new URL('./ml-worker.js', import.meta.url), { type: 'module' }));
+    this.worker = getMlWorker();
 
     const useGpu = !profile.mobile && profile.webgpu;
     const model = profile.asrModel || (useGpu ? 'onnx-community/whisper-base' : 'onnx-community/whisper-tiny');
@@ -23,18 +25,12 @@ export class Ears {
       ? { device: 'webgpu', dtype: { encoder_model: 'fp32', decoder_model_merged: 'q4' } }
       : { device: 'wasm', dtype: 'q8' };
 
-    // Aggregate per-file progress: sum(loaded) / sum(total) across all files.
-    const files = {};
-    const progress_callback = (p) => {
-      if (p.status !== 'progress' || !p.total) return;
-      files[p.file] = { loaded: p.loaded, total: p.total };
-      let loaded = 0, total = 0;
-      for (const f of Object.values(files)) { loaded += f.loaded; total += f.total; }
-      onProgress(total ? loaded / total : 0, 'Loading ears');
-    };
-
-    await this.worker.loadAsr(model, opts, Comlink.proxy(progress_callback));
+    // The worker aggregates per-file progress into one throttled fraction.
+    await this.worker.loadAsr(model, opts, progress(onProgress));
     this.asr = true;
+
+    // Silero VAD runs on onnxruntime-web on this thread: one WASM thread so it never fights the UI for cores.
+    if (globalThis.ort?.env?.wasm) globalThis.ort.env.wasm.numThreads = 1;
 
     this.vad = await vad.MicVAD.new({
       model: 'v5',
@@ -59,12 +55,12 @@ export class Ears {
   async pause() { await this.vad?.pause(); }
 
   async transcribe(audio, { language = 'english', task = 'transcribe' } = {}) {
-    if (!this.asr) return '';
+    if (!this.asr || !audio || audio.length < MIN_SAMPLES) return '';
     const raw = await this.worker.transcribe(audio, { language, task });
     const text = raw.trim();
     if (text.length < 2) return '';
     if (/^[\[(].*[\])]$/.test(text)) return ''; // [BLANK_AUDIO], (music), ...
-    const norm = text.toLowerCase().replace(/[^a-z ]/g, '').trim();
+    const norm = text.toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, ' ').replace(/\s+/g, ' ').trim();
     if (norm.length < 2 || HALLUCINATIONS.has(norm)) return '';
     return text;
   }

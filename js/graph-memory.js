@@ -1,64 +1,38 @@
 // GraphRAG-style memory on the device: a timeline of what was said / seen / heard, an entity graph over it
-// (compromise.js NLP), and semantic retrieval (MiniLM embeddings via transformers.js). Stored in IndexedDB.
-const IDB = 'https://cdn.jsdelivr.net/npm/idb-keyval@6.3.0/+esm';
-const NLP = 'https://cdn.jsdelivr.net/npm/compromise@14.19.0/+esm';
-const COMLINK = 'https://cdn.jsdelivr.net/npm/comlink@4.4.2/+esm';
-const MAX_EVENTS = 5000;
-const STOP = new Set(['i', 'you', 'me', 'it', 'that', 'this', 'thing', 'things', 'something', 'image', 'picture', 'camera', 'time', 'way', 'lot']);
-
-let kv, nlp;
-const db = async () => (kv ||= await import(IDB));
+// (compromise.js NLP), and semantic retrieval (MiniLM embeddings via transformers.js). Embedding, entity
+// extraction, the Float32Array vector search and IndexedDB persistence (one key per event) all run in the
+// shared ML worker; this thread keeps only the timeline and the entity → event index.
+import { getMlWorker } from './ml.js';
 
 export class GraphMemory {
   async load() {
-    const { get } = await db();
-    this.events = (await get('g:events')) || [];       // [{ id, at, kind, text, ents: [], vec?: number[] }]
+    this.ml = getMlWorker();
+    this.events = await this.ml.memLoad();             // [{ id, at, kind, text, ents: [] }] (vectors stay in the worker)
     this.index = new Map();                             // entity → event ids
-    for (const e of this.events) for (const n of e.ents) (this.index.get(n) || this.index.set(n, []).get(n)).push(e.id);
+    for (const e of this.events) this._link(e);
     this.byId = new Map(this.events.map((e) => [e.id, e]));
     return this;
   }
 
-  // MiniLM runs in its own Web Worker so embedding never freezes the screen.
-  async _worker() {
-    return (this.workerP ||= import(COMLINK).then((C) => C.wrap(new Worker(new URL('./ml-worker.js', import.meta.url), { type: 'module' }))));
-  }
-  async _embed(text) {
-    try { return await (await this._worker()).embed(text); } catch { return null; }
-  }
-
-  async _entities(text) {
-    try {
-      nlp ||= (await import(NLP)).default;
-      const doc = nlp(text);
-      const out = [...doc.people().out('array'), ...doc.places().out('array'), ...doc.organizations().out('array'), ...doc.nouns().toSingular().out('array')]
-        .map((s) => s.toLowerCase().replace(/^(the|a|an|my|your|some)\s+/, '').replace(/[^\p{L}\p{N} '-]/gu, '').trim())
-        .filter((s) => s.length > 2 && s.split(' ').length <= 3 && !STOP.has(s));
-      return [...new Set(out)].slice(0, 8);
-    } catch { return []; }
-  }
+  _link(e) { for (const n of e.ents || []) (this.index.get(n) || this.index.set(n, []).get(n)).push(e.id); }
 
   // kind: 'said' (user) | 'reply' (assistant) | 'saw' (scene caption) | 'heard' (sound labels) | 'plan' | 'fact'
   async add(kind, text) {
     if (!text?.trim()) return;
+    this.ml ||= getMlWorker();
     const e = { id: Date.now().toString(36) + Math.random().toString(36).slice(2, 5), at: new Date().toISOString(), kind, text: text.slice(0, 400) };
-    e.ents = await this._entities(e.text);
-    e.vec = await this._embed(`${kind}: ${e.text}`);
+    e.ents = await this.ml.memAdd(e);                   // entities + embedding + persistence, in the worker
     this.events.push(e); this.byId.set(e.id, e);
-    for (const n of e.ents) (this.index.get(n) || this.index.set(n, []).get(n)).push(e.id);
-    if (this.events.length > MAX_EVENTS) this.events.splice(0, this.events.length - MAX_EVENTS);
-    clearTimeout(this.saveT);
-    this.saveT = setTimeout(async () => { try { (await db()).set('g:events', this.events); } catch {} }, 800);
+    this._link(e);
+    if (this.events.length > 5000) for (const old of this.events.splice(0, this.events.length - 5000)) this.byId.delete(old.id);
   }
 
   // Top-k semantically similar moments, expanded one hop through shared entities (the "graph" part).
   async retrieve(query, k = 5) {
     if (!this.events.length) return [];
-    const q = await this._embed(query);
-    const scored = q ? this.events.filter((e) => e.vec).map((e) => [e, dot(q, e.vec)]) : [];
-    scored.sort((a, b) => b[1] - a[1]);
-    const hits = scored.slice(0, k).filter(([, s]) => s > 0.3).map(([e]) => e);
-    const qEnts = await this._entities(query);
+    this.ml ||= getMlWorker();
+    const { hits: scored, ents: qEnts } = await this.ml.memSearch(query, k);
+    const hits = scored.map(([id]) => this.byId.get(id)).filter(Boolean);
     const seen = new Set(hits.map((e) => e.id));
     for (const n of [...qEnts, ...hits.flatMap((e) => e.ents)]) {
       for (const id of (this.index.get(n) || []).slice(-2)) {
@@ -78,7 +52,8 @@ export class GraphMemory {
   }
 
   timeline(n = 80) { return this.events.slice(-n); }
-  async clear() { this.events = []; this.index.clear(); this.byId.clear(); try { (await db()).del('g:events'); } catch {} }
+  async clear() {
+    this.events = []; this.index.clear(); this.byId.clear();
+    try { await (this.ml || getMlWorker()).memClear(); } catch {}
+  }
 }
-
-function dot(a, b) { let s = 0; for (let i = 0; i < a.length; i++) s += a[i] * b[i]; return s; }

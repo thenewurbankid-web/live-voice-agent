@@ -1,5 +1,5 @@
 // Kokoro-82M TTS (kokoro-js) with browser speechSynthesis fallback. Pure composition.
-const COMLINK = 'https://cdn.jsdelivr.net/npm/comlink@4.4.2/+esm';
+import { createMlWorker, progress } from './ml.js';
 const MODEL_ID = 'onnx-community/Kokoro-82M-v1.0-ONNX';
 
 export const VOICES = [
@@ -44,18 +44,17 @@ export class Voice {
   async load(voiceKey, profile, onProgress = () => {}) {
     this.voiceKey = voiceKey;
     if (voiceKey === 'browser') { onProgress(1, 'Device voice ready'); return; }
-    const Comlink = await import(COMLINK);
-    const w = Comlink.wrap(new Worker(new URL('./ml-worker.js', import.meta.url), { type: 'module' }));
-    const cb = (p) => {
-      if (p && p.status === 'progress' && p.total) onProgress(Math.min(1, p.loaded / p.total), `Voice: ${p.file || ''}`);
-    };
+    // Kokoro keeps its own ml-worker instance (not the shared one) so speech is synthesized in parallel
+    // with ASR, captioning, translation and embeddings.
+    const w = createMlWorker();
+    const cb = progress((f) => onProgress(Math.min(1, f), 'Loading voice'));
     const wantGpu = !profile.mobile && profile.webgpu;
     try {
       const opts = wantGpu ? { device: 'webgpu', dtype: 'fp32' } : { device: 'wasm', dtype: 'q8' };
-      await w.loadTts(MODEL_ID, opts, Comlink.proxy(cb));
+      await w.loadTts(MODEL_ID, opts, cb);
     } catch (e) {
       if (!wantGpu) throw e;
-      await w.loadTts(MODEL_ID, { device: 'wasm', dtype: 'q8' }, Comlink.proxy(cb));
+      await w.loadTts(MODEL_ID, { device: 'wasm', dtype: 'q8' }, cb);
     }
     this.tts = { generate: (t, { voice }) => w.speak(t, voice) }; // same shape as KokoroTTS, runs in the worker
     onProgress(1, 'Voice ready');

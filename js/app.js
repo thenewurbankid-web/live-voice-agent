@@ -18,11 +18,13 @@ import { Aware } from './aware.js';
 import { GraphMemory } from './graph-memory.js';
 // Cap every startup wait so a slow phone never blocks the UI from wiring its buttons.
 const within = (p, ms) => Promise.race([p, new Promise((_, no) => setTimeout(() => no(new Error('timeout')), ms))]);
+// Memory loads in the background; the UI wires up immediately and start()/respond() await it.
 const graph = new GraphMemory();
-await within(graph.load(), 3000).catch(() => { graph.events = []; graph.index = new Map(); graph.byId = new Map(); });
+const graphReady = within(graph.load(), 3000).catch(() => { graph.events = []; graph.index = new Map(); graph.byId = new Map(); });
 let sounds = null, aware = null, soundBefore = null, lastSpeechAt = 0, recorder = null;
 const memory = new Memory();
-await within(memory.load(), 3000).catch(() => { memory.facts = []; memory.turns = []; });
+const memoryReady = within(memory.load(), 3000).catch(() => { memory.facts = []; memory.turns = []; });
+const memReady = Promise.all([graphReady, memoryReady]);
 let lastAudio = null;
 
 const $ = (id) => document.getElementById(id);
@@ -51,15 +53,20 @@ const chips = [
 ];
 $('chips').innerHTML = chips.map(([t, c]) => `<span class="chip ${c}">${t}</span>`).join('');
 
-$('brain').innerHTML = BRAINS.map((b) => `<option value="${b.key}">${b.label}</option>`).join('');
-$('brain').value = store.get('brain', defaultBrainKey(profile));
+// Phones: desktop-only brains (mobileOk: false, e.g. Phi-3.5 Vision ~4 GB) are not offered and never restored.
+const brainOk = (k) => BRAINS.some((b) => b.key === k && (!profile.mobile || b.mobileOk !== false));
+$('brain').innerHTML = BRAINS.filter((b) => brainOk(b.key)).map((b) => `<option value="${b.key}">${b.label}</option>`).join('');
+const savedBrain = store.get('brain', null);
+$('brain').value = brainOk(savedBrain) ? savedBrain : defaultBrainKey(profile);
 $('voice').innerHTML = VOICES.map((v) => `<option value="${v.key}">${v.label}</option>`).join('');
 $('voice').value = store.get('voice', 'af_heart');
 $('mode').value = store.get('mode', 'chat');
 $('useCam').checked = store.get('useCam', true);
 $('bargeIn').checked = store.get('bargeIn', true);
 $('useWeb').checked = store.get('useWeb', true);
-$('useAware').checked = store.get('useAware', true);
+// Phones: Aware off by default (the captioner is heavy). Its own key, so the old saved default (on) doesn't carry over.
+const AWARE_KEY = profile.mobile ? 'useAwareMobile' : 'useAware';
+$('useAware').checked = store.get(AWARE_KEY, !profile.mobile);
 $('useRec').checked = store.get('useRec', false);
 const syncMode = () => { $('brain').closest('label').classList.toggle('hidden', $('mode').value !== 'chat'); };
 $('mode').onchange = syncMode; syncMode();
@@ -196,7 +203,10 @@ async function respond(text, my) {
   const graphCtx = within(graph.contextFor(text), 1200).catch(() => ''); // memory helps, but never holds up a reply
   caption('you', text);
   const visual = VISUAL_RE.test(text);
-  logLine('You', text, { image: visual && eyes?.enabled ? eyes.snapshot(320) : null, audio: lastAudio });
+  // One camera frame per visual turn: the log thumbnail (memory.js downsizes it) and vision/describe share it.
+  const frame = visual && eyes?.enabled ? eyes.snapshot(brain?.vision ? 448 : 384) : null;
+  await memReady;
+  logLine('You', text, { image: frame, audio: lastAudio });
   lastAudio = null;
   if (await handleIntent(text, my)) return;
   const asked = text;
@@ -221,11 +231,12 @@ async function respond(text, my) {
   }
   let image = null, scene = null;
   // Frames are taken only when the question is about what the camera sees: no per-turn vision cost otherwise.
-  const frame = visual && eyes?.enabled ? eyes.snapshot(brain.vision ? 448 : 384) : null;
   if (frame && brain.vision) image = frame;
-  else if (frame && eyes.captionerReady) {
+  else if (frame && (eyes.captionerReady || profile.mobile)) {
     setState('looking');
-    scene = await eyes.describe(frame).catch(() => '') || null;
+    if (!eyes.captionerReady) { caption('agent', 'Loading my eyes (first time only)…'); await ensureCaptioner(); }
+    if (my !== turn) return;
+    scene = eyes.captionerReady ? await eyes.describe(frame).catch(() => '') || null : null;
     if (my !== turn) return;
   }
   setState('thinking');
@@ -352,7 +363,7 @@ async function handleIntent(text, my) {
   // H) hearing: name the ambient sound
   if (/\b(can you hear|do you hear|what do you hear|hear (that|this)|what('?s| is) (that|this) (sound|noise)|what sound)\b/.test(t)) {
     if (!sounds?.clf) { say("My sound recognizer isn't loaded on this device, but I can hear your voice.", my); return true; }
-    let found = describeSounds(sounds.classify(soundBefore));
+    let found = describeSounds(await sounds.classify(soundBefore));
     if (!found) { caption('agent', 'Listening…'); setState('looking'); found = describeSounds(await sounds.listen(3)); }
     if (my !== turn) return true;
     if (found) graph.add('heard', found).catch(() => {});
@@ -464,24 +475,42 @@ function say(text, my) {
 }
 
 // ---------- aware mode: proactive seeing + hearing ----------
-const canSpeak = () => state === 'listening' && micOn && Date.now() - lastSpeechAt > 4000;
+// Only while idle: never while the brain is thinking or speaking (state must be 'listening').
+const canSpeak = () => state === 'listening' && micOn && !document.hidden && Date.now() - lastSpeechAt > 4000;
+// SmolVLM captioner: on phones it loads only when first needed (a visual question, or Aware), never at startup.
+let captionerP = null;
+function ensureCaptioner() {
+  if (eyes?.captionerReady) return Promise.resolve(true);
+  if (!eyes) return Promise.resolve(false);
+  return (captionerP ||= eyes.loadCaptioner(profile, (f) => bgPill(f >= 1 ? '' : `Eyes ${Math.round((f || 0) * 100)}%`))
+    .then(() => { eyes.captionerReady = true; bgPill(''); return true; },
+      (e) => { console.warn('captioner', e); captionerP = null; bgPill(''); return false; }));
+}
+let bgDone; const bgReady = new Promise((r) => (bgDone = r));   // the start-up background queue has finished
 function startAware() {
-  if (eyes?.captionerReady) {
+  // After the background queue, so the captioner never loads alongside the voice / sound models.
+  bgReady.then(() => (profile.mobile && eyes?.enabled ? ensureCaptioner() : eyes?.captionerReady)).then((ok) => {
+    if (!ok || aware) return;
     aware = new Aware({
       eyes, canSpeak,
       onRemark: ({ text, scene }) => { graph.add('saw', scene).catch(() => {}); say(text, ++turn); },
     });
     aware.start();
-  }
+  });
+  // Phones: no ambient loop; sounds are classified only when asked ("can you hear that?").
+  if (profile.mobile) return;
   // sounds: every 6 s, note strong non-speech sounds; mention a new one at most every 45 s
-  let lastSound = '', lastSoundSay = 0;
-  setInterval(() => {
-    if (!sounds?.clf || state !== 'listening' || Date.now() - lastSpeechAt < 4000) return;
-    const top = sounds.classify(sounds.snapshot(3)).filter((x) => x.score > 0.5)[0];
-    if (!top || top.name === lastSound) return;
-    lastSound = top.name;
-    graph.add('heard', top.name.toLowerCase()).catch(() => {});
-    if (canSpeak() && Date.now() - lastSoundSay > 45000) { lastSoundSay = Date.now(); say(`I can hear ${top.name.toLowerCase()}.`, ++turn); }
+  let lastSound = '', lastSoundSay = 0, busy = false;
+  setInterval(async () => {
+    if (busy || document.hidden || !sounds?.clf || state !== 'listening' || Date.now() - lastSpeechAt < 4000) return;
+    busy = true;
+    try {
+      const top = (await sounds.classify(sounds.snapshot(3)) || []).filter((x) => x.score > 0.5)[0];
+      if (!top || top.name === lastSound) return;
+      lastSound = top.name;
+      graph.add('heard', top.name.toLowerCase()).catch(() => {});
+      if (canSpeak() && Date.now() - lastSoundSay > 45000) { lastSoundSay = Date.now(); say(`I can hear ${top.name.toLowerCase()}.`, ++turn); }
+    } catch {} finally { busy = false; }
   }, 6000);
 }
 
@@ -524,23 +553,33 @@ function restartRecording() { if (recorder) { try { recorder.stop(); } catch {} 
 // Camera sleeps while the app is in the background (battery, heat); comes back as it was.
 let camWasOn = false;
 document.addEventListener('visibilitychange', () => {
+  if (!document.hidden && !$('call').classList.contains('hidden')) startMeter();
   if (!eyes?.stream) return;
   if (document.hidden) { camWasOn = eyes.enabled; if (camWasOn) eyes.setEnabled(false); }
   else if (camWasOn) eyes.setEnabled(true);
 });
 
 // ---------- orb level meter ----------
-function meter() {
+// ~20 fps, one reused buffer, and no frames at all while the page is hidden.
+let meterRaf = 0, meterLast = 0, meterBuf = null, meterLvl = '';
+function meter(ts) {
+  meterRaf = 0;
+  if (document.hidden) return;                       // visibilitychange restarts it
+  meterRaf = requestAnimationFrame(meter);
+  if (ts - meterLast < 50) return;
+  meterLast = ts;
   const a = state === 'speaking' ? voice?.analyser : micAnalyser;
   let lvl = 0;
   if (a) {
-    const buf = new Uint8Array(a.fftSize); a.getByteTimeDomainData(buf);
-    let sum = 0; for (const v of buf) sum += ((v - 128) / 128) ** 2;
-    lvl = Math.min(1, Math.sqrt(sum / buf.length) * 4);
+    if (meterBuf?.length !== a.fftSize) meterBuf = new Uint8Array(a.fftSize);
+    a.getByteTimeDomainData(meterBuf);
+    let sum = 0; for (let i = 0; i < meterBuf.length; i++) sum += ((meterBuf[i] - 128) / 128) ** 2;
+    lvl = Math.min(1, Math.sqrt(sum / meterBuf.length) * 4);
   }
-  $('orb').style.setProperty('--lvl', lvl.toFixed(3));
-  requestAnimationFrame(meter);
+  const v = lvl.toFixed(2);
+  if (v !== meterLvl) { meterLvl = v; $('orb').style.setProperty('--lvl', v); }
 }
+function startMeter() { if (!meterRaf && !document.hidden) meterRaf = requestAnimationFrame(meter); }
 
 
 // A load step with a stall watchdog: if its progress doesn't move for STALL_MS it fails (or is skipped if optional)
@@ -580,6 +619,7 @@ async function start() {
 
   const prog = $('prog'); prog.innerHTML = ''; prog.classList.remove('hidden');
   try {
+    await memReady;
     micStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
     micAnalyser = audioCtx.createAnalyser(); micAnalyser.fftSize = 512;
     audioCtx.createMediaStreamSource(micStream).connect(micAnalyser);
@@ -597,8 +637,9 @@ async function start() {
       if (!profile.webgpu) throw new Error('This browser has no WebGPU, which the AI brain needs. Try Chrome or Edge (Android/desktop) or Safari 26+ (iPhone). Translator mode works without it.');
       brain = new Brain($('brain').value, profile);
       brain.history = memory.recentHistory();
-      now.unshift(guard(prog, 'Brain · ' + BRAINS.find((b) => b.key === $('brain').value)?.label, (row) => brain.load(row)));
-      if (useCam && (!brain.vision || $('useAware').checked))
+      now.unshift(guard(prog, 'Brain · ' + brain.label, (row) => brain.load(row)));
+      // Phones load the captioner lazily (first visual question, or Aware after this queue); desktop preloads it.
+      if (useCam && !profile.mobile && (!brain.vision || $('useAware').checked))
         later.push(guard(prog, 'Eyes · SmolVLM-256M', (row) => eyes.loadCaptioner(profile, row).then(() => { eyes.captionerReady = true; }), true));
       sounds = new Sounds();
       later.push(guard(prog, 'Hearing · YAMNet sound recognizer', (row) => sounds.load(audioCtx, micStream, row).catch((e) => { sounds = null; throw e; }), true));
@@ -620,6 +661,7 @@ async function start() {
     (async () => {
       for (const j of later) await j().catch(() => {});
       bgPill('');
+      bgDone();
     })();
   } catch (e) {
     console.error(e);
@@ -631,12 +673,14 @@ async function start() {
 
 async function enterCall() {
   $('setup').classList.add('hidden'); $('call').classList.remove('hidden');
-  $('modelPill').textContent = mode === 'chat' ? BRAINS.find((b) => b.key === $('brain').value)?.label.split(' ·')[0]
+  // The model actually running (Brain may have swapped a desktop-only pick for the phone default).
+  $('modelPill').textContent = mode === 'chat' ? (brain?.label || '').split(' ·')[0]
     : { 'de-en': 'Deutsch → English', 'te-en': 'తెలుగు → English', 'en-te': 'English → తెలుగు' }[mode];
+  if (mode === 'chat' && brain?.swappedFrom) caption('tr', `${brain.swappedFrom} is too big for this phone, so I switched to ${brain.label}.`);
   if (mode === 'en-te' && !voice.hasVoice('te-IN')) caption('tr', 'No Telugu voice on this device: translations are shown as text.');
   $('typeIn').placeholder = { 'de-en': 'Deutsch eingeben…', 'te-en': 'తెలుగులో టైప్ చేయండి…' }[mode] || 'Type a message…';
   $('seeBtn').classList.toggle('hidden', mode !== 'de-en');
-  store.set('useAware', $('useAware').checked); store.set('useRec', $('useRec').checked);
+  store.set(AWARE_KEY, $('useAware').checked); store.set('useRec', $('useRec').checked);
   if (mode === 'chat' && $('useAware').checked) startAware();
   if ($('useRec').checked) startRecording();
   $('webBtn').classList.toggle('on', webOn); $('webBtn').classList.toggle('off', !webOn);
@@ -646,7 +690,7 @@ async function enterCall() {
   try { await navigator.wakeLock?.request('screen'); } catch {}
   await ears.start();
   setState('listening');
-  meter();
+  startMeter();
   if (mode === 'chat') { voice.say("Hi! I'm listening."); }
 }
 
@@ -687,7 +731,13 @@ $('openPlan').onclick = () => openPlans('new').catch((e) => { $('err').textConte
 $('researchBtn').onclick = () => { researchOn = !researchOn; store.set('research', researchOn); $('researchBtn').classList.toggle('on', researchOn); $('researchBtn').classList.toggle('off', !researchOn);
   caption('tr', researchOn ? 'Research mode on: I search, read the sources and answer with citations.' : 'Research mode off'); };
 $('webBtn').onclick = () => { webOn = !webOn; store.set('useWeb', webOn); $('webBtn').classList.toggle('on', webOn); $('webBtn').classList.toggle('off', !webOn); caption('tr', webOn ? 'Web access on' : 'Offline only'); };
+// Object URLs made for the transcript sheet; revoked when it closes (or reopens).
+const logUrls = new Set();
+const logUrl = (blob) => { const u = URL.createObjectURL(blob); logUrls.add(u); return u; };
+const unUrl = (u) => { URL.revokeObjectURL(u); logUrls.delete(u); };
+function revokeLogUrls() { for (const u of logUrls) URL.revokeObjectURL(u); logUrls.clear(); }
 $('logBtn').onclick = () => {
+  revokeLogUrls();
   const log = $('log'); log.innerHTML = '';
   const top = document.createElement('p');
   top.innerHTML = `<b>Memory:</b> ${memory.facts.length} facts · ${memory.turns.length} messages, stored on this device. Say "forget everything" to clear.`;
@@ -706,7 +756,13 @@ $('logBtn').onclick = () => {
     for (const r of recs.slice(0, 10)) {
       const b = document.createElement('button'); b.className = 'ghost';
       b.textContent = `▶ ${new Date(r.start).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' })} · ${(r.bytes / 1e6).toFixed(1)} MB`;
-      b.onclick = async () => { const blob = await memory.recording(r.id); if (!blob) return; const v = document.createElement('video'); v.controls = true; v.playsInline = true; v.style.width = '100%'; v.src = URL.createObjectURL(blob); b.replaceWith(v); v.play().catch(() => {}); };
+      b.onclick = async () => {
+        const blob = await memory.recording(r.id); if (!blob) return;
+        const v = document.createElement('video'); v.controls = true; v.playsInline = true; v.style.width = '100%';
+        const u = logUrl(blob); v.src = u;
+        v.onended = () => { unUrl(u); v.replaceWith(b); };   // tap ▶ again to replay
+        b.replaceWith(v); v.play().catch(() => {});
+      };
       h.after(b);
     }
   }).catch(() => {});
@@ -714,10 +770,21 @@ $('logBtn').onclick = () => {
     const p = document.createElement('p');
     p.innerHTML = `<b>${new Date(t.at).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' })} · ${t.who}:</b> `;
     p.append(t.text);
-    if (t.image) { const im = new Image(); im.src = t.image; im.style.cssText = 'display:block;max-width:160px;border-radius:8px;margin-top:4px'; p.append(im); }
+    if (t.img || t.image) {
+      const im = new Image(); im.alt = ''; im.style.cssText = 'display:block;max-width:160px;border-radius:8px;margin-top:4px'; p.append(im);
+      memory.image(t.img || t.id).then((blob) => {
+        if (!blob) return im.remove();
+        const u = logUrl(blob); im.onload = im.onerror = () => unUrl(u); im.src = u;   // a decoded image stays visible after revoke
+      }).catch(() => im.remove());
+    }
     if (t.clip) {
       const b = document.createElement('button'); b.className = 'ghost'; b.textContent = '▶ voice'; b.style.marginLeft = '6px';
-      b.onclick = async () => { const blob = await memory.clip(t.clip); if (blob) new Audio(URL.createObjectURL(blob)).play(); };
+      b.onclick = async () => {
+        const blob = await memory.clip(t.clip); if (!blob) return;
+        const u = logUrl(blob), a = new Audio(u);
+        a.onended = a.onerror = () => unUrl(u);
+        a.play().catch(() => unUrl(u));
+      };
       p.append(b);
     }
     log.append(p);
@@ -727,10 +794,14 @@ $('logBtn').onclick = () => {
 };
 $('endBtn').onclick = async () => {
   clearInterval(sampler);
+  await memory.flush();
   if (recorder?.state === 'recording') { await new Promise((r) => { recorder.onstop = r; recorder.stop(); setTimeout(r, 1500); }); await memory.recQ; }
   location.reload();
 };
-document.querySelectorAll('[data-close]').forEach((b) => (b.onclick = () => b.closest('.sheet').classList.add('hidden')));
+document.querySelectorAll('[data-close]').forEach((b) => (b.onclick = () => {
+  const sheet = b.closest('.sheet'); sheet.classList.add('hidden');
+  if (sheet.id === 'logSheet') { sheet.querySelectorAll('video,audio').forEach((m) => m.pause()); revokeLogUrls(); }
+}));
 
 let berlin;
 async function openMap() {
@@ -773,3 +844,6 @@ async function openMaps(opts = {}) {
 }
 $('mapBtn').onclick = () => openMaps().catch((e) => caption('agent', 'Maps unavailable: ' + e.message));
 $('openMap').onclick = () => openMaps().catch((e) => { $('err').textContent = 'Maps unavailable: ' + e.message; $('err').classList.remove('hidden'); });
+// Every control is wired: the setup screen is usable now (memory may still be loading; start() waits for it).
+$('start').disabled = false;
+performance.mark?.('start-ready');

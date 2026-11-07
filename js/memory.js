@@ -17,55 +17,108 @@ function toWav(f32, rate = 16000) {
   return new Blob([buf], { type: 'audio/wav' });
 }
 
+// Camera frame (data URL) → small JPEG Blob. Stored under its own key, never inside the turns index.
 function thumb(dataUrl, max = 320) {
   return new Promise((res) => {
     const img = new Image();
     img.onload = () => {
       const k = Math.min(1, max / Math.max(img.width, img.height));
-      const c = Object.assign(document.createElement('canvas'), { width: img.width * k, height: img.height * k });
+      const c = Object.assign(document.createElement('canvas'), { width: Math.round(img.width * k), height: Math.round(img.height * k) });
       c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
-      res(c.toDataURL('image/jpeg', 0.6));
+      c.toBlob((b) => res(b), 'image/jpeg', 0.6);
     };
     img.onerror = () => res(null);
     img.src = dataUrl;
   });
 }
+const dataUrlToBlob = (u) => fetch(u).then((r) => r.blob()).catch(() => null);
 
 export class Memory {
+  constructor() {
+    // Flush the debounced turns index before the page can be killed in the background.
+    addEventListener('visibilitychange', () => { if (document.hidden) this.flush(); });
+    addEventListener('pagehide', () => this.flush());
+  }
+
   async load() {
     const { get } = await db();
     this.facts = (await get('mem:facts')) || [];
-    this.turns = (await get('mem:turns')) || [];   // [{ id, at, who, text, image?, clip? }]
+    this.turns = (await get('mem:turns')) || [];   // [{ id, at, who, text, img?, clip? }] (old turns: image = base64 data URL)
     try { await navigator.storage?.persist?.(); } catch {}
+    setTimeout(() => this._migrate().catch(() => {}), 2000);   // move old base64 thumbnails out of the index, off the startup path
     return this;
   }
 
-  async _save() {
+  // Old turns kept their thumbnail inline as base64; move each into its own Blob key.
+  async _migrateTurn(t) {
+    if (typeof t.image !== 'string') return false;
+    const blob = t.image.startsWith('data:') ? await dataUrlToBlob(t.image) : null;
+    if (blob) await (await db()).set('mem:img:' + t.id, blob);
+    delete t.image;
+    if (blob) t.img = t.id;
+    return true;
+  }
+  async _migrate() {
+    let n = 0;
+    for (const t of this.turns || []) if (await this._migrateTurn(t)) n++;
+    if (n) this._queueSave();
+  }
+
+  // The turns index is saved at most once a second, not on every turn.
+  _queueSave() {
+    clearTimeout(this.saveT);
+    this.saveT = setTimeout(() => this.flush(), 1000);
+  }
+  flush() {
+    clearTimeout(this.saveT); this.saveT = null;
+    return (this.saveQ = (this.saveQ || Promise.resolve()).then(() => this._saveTurns()).catch(() => {}));
+  }
+
+  async _saveTurns() {
+    if (!this.turns) return;
     const { set, del } = await db();
-    // cap images / clips (oldest first) and turns
+    // cap images / clips (oldest first) and turns; their blobs go with them
     let imgs = 0, clips = 0;
     for (let i = this.turns.length - 1; i >= 0; i--) {
       const t = this.turns[i];
       if (t.image && ++imgs > LIMITS.images) delete t.image;
+      if (t.img && ++imgs > LIMITS.images) { await del('mem:img:' + t.img); delete t.img; }
       if (t.clip && ++clips > LIMITS.clips) { await del('mem:clip:' + t.clip); delete t.clip; }
     }
-    this.turns = this.turns.slice(-LIMITS.turns);
+    const drop = this.turns.length - LIMITS.turns;
+    for (const t of drop > 0 ? this.turns.slice(0, drop) : []) {
+      if (t.img) await del('mem:img:' + t.img);
+      if (t.clip) await del('mem:clip:' + t.clip);
+    }
+    if (drop > 0) this.turns = this.turns.slice(drop);
     await set('mem:turns', this.turns);
-    await set('mem:facts', this.facts.slice(-LIMITS.facts));
   }
+
+  async _saveFacts() { await (await db()).set('mem:facts', this.facts.slice(-LIMITS.facts)); }
 
   async addTurn(who, text, { image = null, audio = null } = {}) {
     const t = { id: Date.now() + Math.random().toString(36).slice(2, 6), at: new Date().toISOString(), who, text };
-    if (image) t.image = await thumb(image);
-    if (audio) { t.clip = t.id; (await db()).set('mem:clip:' + t.id, toWav(audio)); }
+    const { set } = await db();
+    if (image) { const b = await thumb(image); if (b) { await set('mem:img:' + t.id, b); t.img = t.id; } }
+    if (audio) { t.clip = t.id; set('mem:clip:' + t.id, toWav(audio)); }
     this.turns.push(t);
-    await this._save();
+    this._queueSave();
     return t;
+  }
+
+  // Thumbnail Blob for a turn (old base64 turns are migrated the first time they are read).
+  async image(id) {
+    const { get } = await db();
+    const hit = await get('mem:img:' + id);
+    if (hit) return hit;
+    const t = this.turns?.find((x) => x.id === id || x.img === id);
+    if (t && await this._migrateTurn(t)) { this._queueSave(); return t.img ? get('mem:img:' + t.img) : null; }
+    return null;
   }
 
   async clip(id) { return (await db()).get('mem:clip:' + id); }
 
-  async remember(fact) { this.facts.push({ at: new Date().toISOString(), text: fact }); await this._save(); }
+  async remember(fact) { this.facts.push({ at: new Date().toISOString(), text: fact }); await this._saveFacts(); }
 
   // ---- continuous conversation recordings (MediaRecorder chunks) ----
   // Chunks arrive every few seconds; saves run one at a time so they never overwrite each other's index.
@@ -101,7 +154,8 @@ export class Memory {
 
   async forgetAll() {
     const { clear } = await db();
-    await clear(); this.facts = []; this.turns = [];
+    clearTimeout(this.saveT); this.saveT = null;
+    await this.saveQ; await clear(); this.facts = []; this.turns = [];
   }
 
   // Context handed to the brain: known facts + a few recent exchanges from earlier sessions.

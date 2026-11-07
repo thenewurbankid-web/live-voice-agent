@@ -57,13 +57,19 @@ select{background:#0f1218;border:1px solid var(--line);border-radius:12px;paddin
 [data-state=transcribing] .pill .dot,[data-state=thinking] .pill .dot{background:#ffd166}
 [data-state=speaking] .pill .dot{background:var(--accent)}
 .stage{position:relative;flex:1;display:flex;align-items:center;justify-content:center}
-#orb{--lvl:0;width:min(46vw,220px);aspect-ratio:1;border-radius:50%;border:0;cursor:pointer;
-  background:radial-gradient(circle at 35% 30%,#ffffffa0,transparent 38%),conic-gradient(from var(--spin,0deg),var(--accent),var(--accent2),#5ee1d5,var(--accent));
-  transform:scale(calc(.82 + var(--lvl)*.45));transition:transform .08s linear;box-shadow:0 0 calc(30px + var(--lvl)*90px) color-mix(in srgb,var(--accent) 60%,transparent);animation:spin 8s linear infinite}
+/* Orb: only transform + opacity change per frame (compositor-only). The glow is a pre-blurred radial gradient,
+   the conic ring spins as its own layer, the highlight sits on top and does not rotate. */
+#orb{--lvl:0;position:relative;width:min(46vw,220px);aspect-ratio:1;border-radius:50%;border:0;padding:0;cursor:pointer;background:none;
+  transform:scale(calc(.82 + var(--lvl)*.45));transition:transform .08s linear;will-change:transform}
+#orb::before{content:"";position:absolute;inset:-45%;border-radius:50%;pointer-events:none;z-index:-1;
+  background:radial-gradient(closest-side,color-mix(in srgb,var(--accent) 60%,transparent) 52%,color-mix(in srgb,var(--accent) 22%,transparent) 72%,transparent);
+  opacity:calc(.45 + var(--lvl)*.55);transform:scale(calc(.85 + var(--lvl)*.45));transition:opacity .08s linear,transform .08s linear;will-change:transform,opacity}
+#orb .ring{position:absolute;inset:0;border-radius:50%;pointer-events:none;
+  background:conic-gradient(from 0deg,var(--accent),var(--accent2),#5ee1d5,var(--accent));animation:spin 8s linear infinite;will-change:transform}
+#orb::after{content:"";position:absolute;inset:0;border-radius:50%;pointer-events:none;background:radial-gradient(circle at 35% 30%,#ffffffa0,transparent 38%)}
 #call:not(.nocam) #orb{width:min(22vw,96px);position:absolute;right:16px;bottom:8px}
-[data-state=thinking] #orb,[data-state=transcribing] #orb{animation:spin 1.6s linear infinite,pulse 1.2s ease-in-out infinite}
-@property --spin{syntax:"<angle>";inherits:false;initial-value:0deg}
-@keyframes spin{to{--spin:360deg}}
+[data-state=thinking] #orb .ring,[data-state=transcribing] #orb .ring{animation:spin 1.6s linear infinite,pulse 1.2s ease-in-out infinite}
+@keyframes spin{to{transform:rotate(1turn)}}
 @keyframes pulse{50%{filter:brightness(1.3)}}
 .captions{position:relative;padding:0 16px 10px;display:flex;flex-direction:column;gap:6px;max-height:38dvh;overflow:hidden;justify-content:flex-end}
 .cap{font-size:clamp(17px,4.6vw,22px);line-height:1.35;text-shadow:0 1px 6px #000}
@@ -81,6 +87,12 @@ form.type button{border:0;border-radius:99px;padding:0 16px;background:#ffffff1f
 .cbtn.off{background:#fff}.cbtn.off svg{stroke:#000}
 .cbtn.end{background:var(--bad)}
 .cbtn.on{background:var(--accent)}
+/* Phones: no live backdrop blur over the moving video (re-blurred every frame); a solid tint looks nearly the same. */
+@media (max-width:700px),(pointer:coarse){
+  .pill,.cbtn{backdrop-filter:none;-webkit-backdrop-filter:none}
+  .pill{background:#000000b8}
+  .cbtn{background:#2b2e36c7}
+}
 /* ---------- sheets ---------- */
 .sheet{position:fixed;inset:auto 0 0 0;max-height:80dvh;background:var(--panel);border-radius:20px 20px 0 0;border-top:1px solid var(--line);padding:12px 16px calc(16px + var(--safe-b));overflow:auto;z-index:5;display:flex;flex-direction:column;gap:10px}
 .sheet header{display:flex;justify-content:space-between;align-items:center}
@@ -90,8 +102,9 @@ form.type button{border:0;border-radius:99px;padding:0 16px;background:#ffffff1f
 @media (min-width:900px){.sheet{left:auto;right:16px;bottom:16px;width:420px;border-radius:20px;border:1px solid var(--line)}}
 </style>
 <!-- Silero VAD (global `vad`) and its ONNX runtime -->
-<script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/ort.wasm.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/@ricky0123/vad-web@0.0.31/dist/bundle.min.js"></script>
+<!-- defer: only used by ears.load(), which runs after the Start tap; they no longer block first paint -->
+<script defer src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/ort.wasm.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/@ricky0123/vad-web@0.0.31/dist/bundle.min.js"></script>
 <script type="module" src="js/app.js"></script>
 </head>
 <body>
@@ -116,7 +129,7 @@ form.type button{border:0;border-radius:99px;padding:0 16px;background:#ffffff1f
     <div class="toggle"><span>Record video + audio to memory (on device)</span><input type="checkbox" id="useRec"></div>
     <p class="note">First start downloads the models once (about 1–3 GB, Wi-Fi recommended). After that everything runs offline. Headphones give the best interruption.</p>
   </div>
-  <button class="primary" id="start">Start</button>
+  <button class="primary" id="start" disabled>Start</button>
   <div class="prog hidden" id="prog"></div>
   <p class="err hidden" id="err"></p>
   <button class="ghost" id="openPlan">Berlin day / night-out planner</button>
@@ -133,7 +146,7 @@ form.type button{border:0;border-radius:99px;padding:0 16px;background:#ffffff1f
     <div class="pill" id="modelPill"></div>
     <div class="pill hidden" id="bgPill"></div>
   </div>
-  <div class="stage"><button id="orb" aria-label="Tap to interrupt"></button></div>
+  <div class="stage"><button id="orb" aria-label="Tap to interrupt"><span class="ring"></span></button></div>
   <div class="captions" id="captions"></div>
   <form class="type" id="typeForm" autocomplete="off">
     <input id="typeIn" placeholder="Type a message…" enterkeyhint="send">

@@ -1,75 +1,42 @@
-// Offline German→English text translation: Opus-MT (MarianMT) via transformers.js.
-const TRANSFORMERS = 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.5.1/+esm';
+// Offline text translation in the shared ML worker (transformers.js): Opus-MT de→en and en→de (MarianMT),
+// NLLB-200 distilled 600M for English ↔ Telugu. The worker splits Opus-MT input per sentence.
+import { getMlWorker, progress } from './ml.js';
 
 export class Translator {
+  constructor() { this.ml = getMlWorker(); }
+
   async load(onProgress = () => {}) {
     if (this.pipe) return;
-    const { pipeline } = await import(TRANSFORMERS);
-    const files = {};
-    this.pipe = await pipeline('translation', 'Xenova/opus-mt-de-en', {
-      dtype: 'q8',
-      device: 'wasm',
-      progress_callback: (p) => {
-        if (p.status !== 'progress' || !p.total) return;
-        files[p.file] = [p.loaded, p.total];
-        const [l, t] = Object.values(files).reduce((a, [x, y]) => [a[0] + x, a[1] + y], [0, 0]);
-        onProgress(l / t, 'Loading translator');
-      },
-    });
+    await this.ml.loadTranslator('de-en', progress(onProgress), 'Loading translator');
+    this.pipe = true;
     onProgress(1, 'Translator ready');
   }
 
   // English → Telugu text, offline: NLLB-200 distilled 600M (~600 MB, downloaded on first use).
   async loadTelugu(onProgress = () => {}) {
     if (this.nllb) return;
-    const { pipeline } = await import(TRANSFORMERS);
-    const files = {};
-    this.nllb = await pipeline('translation', 'Xenova/nllb-200-distilled-600M', {
-      dtype: 'q8',
-      device: 'wasm',
-      progress_callback: (p) => {
-        if (p.status !== 'progress' || !p.total) return;
-        files[p.file] = [p.loaded, p.total];
-        const [l, t] = Object.values(files).reduce((a, [x, y]) => [a[0] + x, a[1] + y], [0, 0]);
-        onProgress(l / t, 'Loading Telugu translator');
-      },
-    });
+    await this.ml.loadTranslator('nllb', progress(onProgress), 'Loading Telugu translator');
+    this.nllb = true;
     onProgress(1, 'Telugu translator ready');
   }
 
   async enToTe(text) {
     if (!this.nllb || !text.trim()) return '';
-    const [r] = await this.nllb(text, { src_lang: 'eng_Latn', tgt_lang: 'tel_Telu' });
-    return r?.translation_text?.trim() || '';
+    return this.ml.translate('nllb', text, { src_lang: 'eng_Latn', tgt_lang: 'tel_Telu' });
   }
 
   async teToEn(text) {
     if (!this.nllb) await this.loadTelugu();
-    const [r] = await this.nllb(text, { src_lang: 'tel_Telu', tgt_lang: 'eng_Latn' });
-    return r?.translation_text?.trim() || '';
+    return this.ml.translate('nllb', text, { src_lang: 'tel_Telu', tgt_lang: 'eng_Latn' });
   }
 
-  // English → German, offline: Opus-MT en-de (loaded on first use).
+  // English → German, offline: Opus-MT en-de (loaded on first use by the worker).
   async enToDe(text) {
-    if (!this.enDe) {
-      const { pipeline } = await import(TRANSFORMERS);
-      this.enDe = await pipeline('translation', 'Xenova/opus-mt-en-de', { dtype: 'q8', device: 'wasm' });
-    }
-    const parts = text.match(/[^.!?]+[.!?]*/g)?.map((s) => s.trim()).filter(Boolean) || [text];
-    const out = [];
-    for (const p of parts) { const [r] = await this.enDe(p); if (r?.translation_text) out.push(r.translation_text.trim()); }
-    return out.join(' ');
+    return this.ml.translate('en-de', text);
   }
 
   async deToEn(text) {
     if (!this.pipe || !text.trim()) return '';
-    // Opus-MT tends to drop everything after the first sentence, so translate per sentence.
-    const parts = text.match(/[^.!?]+[.!?]*/g)?.map((s) => s.trim()).filter(Boolean) || [text];
-    const out = [];
-    for (const p of parts) {
-      const [r] = await this.pipe(p);
-      if (r?.translation_text) out.push(r.translation_text.trim());
-    }
-    return out.join(' ');
+    return this.ml.translate('de-en', text);
   }
 }
