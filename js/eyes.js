@@ -20,7 +20,9 @@ export class Eyes {
     if (this.stream) this.stream.getTracks().forEach((t) => t.stop());
     this.stream = await navigator.mediaDevices.getUserMedia({
       audio: false,
-      video: { facingMode: { ideal: facing }, width: { ideal: 640 }, height: { ideal: 480 } },
+      // lite (phones): smaller frames at a low frame rate. Plenty for snapshots, far less battery and heat.
+      video: this.lite ? { facingMode: { ideal: facing }, width: { ideal: 480 }, height: { ideal: 360 }, frameRate: { ideal: 10, max: 12 } }
+        : { facingMode: { ideal: facing }, width: { ideal: 640 }, height: { ideal: 480 } },
     });
     this.video.srcObject = this.stream;
     this.video.muted = true;

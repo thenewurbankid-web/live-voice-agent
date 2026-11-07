@@ -189,7 +189,8 @@ function cutPoint(s, first) {
 async function respond(text, my) {
   const graphCtx = within(graph.contextFor(text), 1200).catch(() => ''); // memory helps, but never holds up a reply
   caption('you', text);
-  logLine('You', text, { image: eyes?.enabled ? eyes.snapshot(448) : null, audio: lastAudio });
+  const visual = VISUAL_RE.test(text);
+  logLine('You', text, { image: visual && eyes?.enabled ? eyes.snapshot(320) : null, audio: lastAudio });
   lastAudio = null;
   if (await handleIntent(text, my)) return;
   const asked = text;
@@ -212,7 +213,8 @@ async function respond(text, my) {
     if (hits.length) text += '\n\n(Web results — answer from these, mention the source:\n' + hits.map((h) => `- ${h.title} (${h.source}): ${h.snippet}`).join('\n') + ')';
   }
   let image = null, scene = null;
-  const frame = eyes?.enabled ? eyes.snapshot(brain.vision ? 448 : 384) : null;
+  // Frames are taken only when the question is about what the camera sees: no per-turn vision cost otherwise.
+  const frame = visual && eyes?.enabled ? eyes.snapshot(brain.vision ? 448 : 384) : null;
   if (frame && brain.vision) image = frame;
   else if (frame && eyes.captionerReady) {
     setState('looking');
@@ -261,6 +263,7 @@ let webOn = true;
 // Research mode: on = every question is researched (search → read sources → answer with citations).
 const RESEARCH_RE = /^(please\s+)?(can you\s+)?(do (a|some)\s+)?(research|look into|dig into|deep dive|find out about|read up on|recherchiere)\b/i;
 let researchOn = false;
+const VISUAL_RE = /\b(see|look|looking|watch|this|that|these|those|here|camera|picture|photo|read|sign|menu|colou?r|wearing|holding|show|what'?s (this|that)|what is (this|that)|where am i|sieh|schau|das hier)\b/i;
 const getOnline = () => webOn && navigator.onLine;
 const places = new Places();
 const plans = new PlansStore();
@@ -477,17 +480,46 @@ function startAware() {
 // ---------- optional continuous video + audio recording into memory ----------
 function startRecording() {
   try {
-    const tracks = [...(eyes?.stream?.getVideoTracks() || []), ...micStream.getAudioTracks()];
-    const mime = ['video/webm;codecs=vp8,opus', 'video/webm', 'video/mp4'].find((m) => MediaRecorder.isTypeSupported(m));
+    // Phones: audio continuously + a still frame every 20 s only when the scene changed (sampled, not video).
+    const sampled = profile.mobile;
+    const vids = sampled ? [] : (eyes?.stream?.getVideoTracks() || []);
+    const tracks = [...vids, ...micStream.getAudioTracks()];
+    const mime = (vids.length ? ['video/webm;codecs=vp8,opus', 'video/webm', 'video/mp4'] : ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4'])
+      .find((m) => MediaRecorder.isTypeSupported(m));
     if (!mime) return;
     const id = 'rec-' + Date.now();
-    recorder = new MediaRecorder(new MediaStream(tracks), { mimeType: mime, videoBitsPerSecond: 250000, audioBitsPerSecond: 32000 });
+    recorder = new MediaRecorder(new MediaStream(tracks), { mimeType: mime, videoBitsPerSecond: 250000, audioBitsPerSecond: 24000 });
     recorder.ondataavailable = (e) => { if (e.data?.size) memory.addChunk(id, e.data, mime).catch(() => {}); };
     recorder.start(5000);
+    if (sampled) startFrameSampler();
     $('recPill').classList.remove('hidden');
   } catch {}
 }
+let sampler = null, samplePrev = null;
+function startFrameSampler() {
+  clearInterval(sampler);
+  const c = Object.assign(document.createElement('canvas'), { width: 32, height: 24 }), g = c.getContext('2d', { willReadFrequently: true });
+  sampler = setInterval(() => {
+    const v = eyes?.video;
+    if (!eyes?.enabled || !v?.videoWidth || document.hidden) return;
+    g.drawImage(v, 0, 0, 32, 24);
+    const px = g.getImageData(0, 0, 32, 24).data, grey = new Uint8Array(32 * 24);
+    let d = 0;
+    for (let i = 0; i < grey.length; i++) { grey[i] = (px[i * 4] + px[i * 4 + 1] * 2 + px[i * 4 + 2]) >> 2; if (samplePrev) d += Math.abs(grey[i] - samplePrev[i]); }
+    const changed = !samplePrev || d / grey.length > 12;
+    samplePrev = grey;
+    if (changed) memory.addTurn('Cam', 'camera sample', { image: eyes.snapshot(320) }).catch(() => {});
+  }, 20000);
+}
 function restartRecording() { if (recorder) { try { recorder.stop(); } catch {} recorder = null; startRecording(); } }
+
+// Camera sleeps while the app is in the background (battery, heat); comes back as it was.
+let camWasOn = false;
+document.addEventListener('visibilitychange', () => {
+  if (!eyes?.stream) return;
+  if (document.hidden) { camWasOn = eyes.enabled; if (camWasOn) eyes.setEnabled(false); }
+  else if (camWasOn) eyes.setEnabled(true);
+});
 
 // ---------- orb level meter ----------
 function meter() {
@@ -545,6 +577,7 @@ async function start() {
     audioCtx.createMediaStreamSource(micStream).connect(micAnalyser);
 
     eyes = new Eyes($('cam'));
+    eyes.lite = profile.mobile;
     if (useCam) await eyes.open('user').catch(() => {});
     $('call').classList.toggle('nocam', !useCam || !eyes.enabled);
 
@@ -684,7 +717,11 @@ $('logBtn').onclick = () => {
   $('logSheet').classList.remove('hidden');
   log.scrollTop = log.scrollHeight;
 };
-$('endBtn').onclick = () => location.reload();
+$('endBtn').onclick = async () => {
+  clearInterval(sampler);
+  if (recorder?.state === 'recording') { await new Promise((r) => { recorder.onstop = r; recorder.stop(); setTimeout(r, 1500); }); await memory.recQ; }
+  location.reload();
+};
 document.querySelectorAll('[data-close]').forEach((b) => (b.onclick = () => b.closest('.sheet').classList.add('hidden')));
 
 let berlin;
