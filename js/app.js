@@ -477,6 +477,28 @@ function meter() {
   requestAnimationFrame(meter);
 }
 
+
+// A load step with a stall watchdog: if its progress doesn't move for STALL_MS it fails (or is skipped if optional)
+// instead of hanging the app forever. Progress is mirrored to the call screen's status pill once the call is open.
+const STALL_MS = 90000;
+function bgPill(text) { const p = $('bgPill'); if (!p) return; p.textContent = text; p.classList.toggle('hidden', !text); }
+function guard(prog, label, run, optional = false) {
+  return () => new Promise((resolve, reject) => {
+    const row = progressRow(prog, label);
+    let last = Date.now(), done = false;
+    const tick = (f, text) => { last = Date.now(); row(f, text); if (!$('call').classList.contains('hidden')) bgPill(f >= 1 ? '' : `${label.split(' ·')[0]} ${Math.round((f || 0) * 100)}%`); };
+    const dog = setInterval(() => {
+      if (done || Date.now() - last < STALL_MS) return;
+      done = true; clearInterval(dog);
+      row(1, optional ? 'skipped (stalled)' : 'stalled');
+      optional ? resolve() : reject(new Error(`${label} stopped loading (no progress for ${STALL_MS / 1000}s). Check the connection and tap Start again; it resumes from the cache.`));
+    }, 3000);
+    Promise.resolve().then(() => run(tick)).then(() => { if (!done) { done = true; clearInterval(dog); row(1, 'ready'); resolve(); } },
+      (e) => { if (done) return; done = true; clearInterval(dog); console.warn(label, e); row(1, optional ? 'skipped' : 'failed');
+        optional ? resolve() : reject(e); });
+  });
+}
+
 // ---------- start ----------
 async function start() {
   $('start').disabled = true; $('err').classList.add('hidden');
@@ -502,39 +524,37 @@ async function start() {
     $('call').classList.toggle('nocam', !useCam || !eyes.enabled);
 
     ears = new Ears({ onSpeechStart, onUtterance });
-    const jobs = [
-      () => ears.load(micStream, profile, progressRow(prog, 'Ears · Whisper + Silero VAD')),
-      () => voice.load($('voice').value, profile, progressRow(prog, 'Voice · Kokoro-82M')),
-    ];
+    // Must-have before the call opens: ears (+ brain or translator). Everything else loads after, in the background.
+    const now = [guard(prog, 'Ears · Whisper + Silero VAD', (row) => ears.load(micStream, profile, row))];
+    const later = [guard(prog, 'Voice · Kokoro-82M (device voice until ready)', (row) => voice.load($('voice').value, profile, row), true)];
     if (mode === 'chat') {
       if (!profile.webgpu) throw new Error('This browser has no WebGPU, which the AI brain needs. Try Chrome or Edge (Android/desktop) or Safari 26+ (iPhone). Translator mode works without it.');
       brain = new Brain($('brain').value, profile);
       brain.history = memory.recentHistory();
-      jobs.unshift(() => brain.load(progressRow(prog, 'Brain · ' + BRAINS.find((b) => b.key === $('brain').value)?.label)));
-      if (useCam && (!brain.vision || $('useAware').checked)) {
-        const row = progressRow(prog, 'Eyes · SmolVLM-256M');
-        jobs.push(() => eyes.loadCaptioner(profile, row).then(() => { eyes.captionerReady = true; }).catch(() => row(1, 'skipped (not supported here)')));
-      }
+      now.unshift(guard(prog, 'Brain · ' + BRAINS.find((b) => b.key === $('brain').value)?.label, (row) => brain.load(row)));
+      if (useCam && (!brain.vision || $('useAware').checked))
+        later.push(guard(prog, 'Eyes · SmolVLM-256M', (row) => eyes.loadCaptioner(profile, row).then(() => { eyes.captionerReady = true; }), true));
+      sounds = new Sounds();
+      later.push(guard(prog, 'Hearing · YAMNet sound recognizer', (row) => sounds.load(audioCtx, micStream, row).catch((e) => { sounds = null; throw e; }), true));
     } else {
       translator = new Translator();
       if (mode === 'te-en') profile.asrModel = 'onnx-community/whisper-small'; // tiny/base are too weak for Telugu
       if (mode === 'de-en') {
-        jobs.push(() => translator.load(progressRow(prog, 'Translator · Opus-MT de→en')));
+        now.push(guard(prog, 'Translator · Opus-MT de→en', (row) => translator.load(row)));
         ocr = new GermanOCR();
-        const row = progressRow(prog, 'Sign reader · Tesseract German');
-        jobs.push(() => ocr.load(row).catch(() => { ocr = null; row(1, 'skipped'); }));
+        later.push(guard(prog, 'Sign reader · Tesseract German', (row) => ocr.load(row).catch((e) => { ocr = null; throw e; }), true));
       }
-      if (mode === 'en-te') jobs.push(() => translator.loadTelugu(progressRow(prog, 'Translator · NLLB-200 en→te')));
+      if (mode === 'en-te') now.push(guard(prog, 'Translator · NLLB-200 en→te', (row) => translator.loadTelugu(row)));
     }
-    if (mode === 'chat') {
-      const row = progressRow(prog, 'Hearing · YAMNet sound recognizer');
-      sounds = new Sounds();
-      jobs.push(() => sounds.load(audioCtx, micStream, row).catch(() => { sounds = null; row(1, 'skipped'); }));
-    }
-    // Phones: load one model at a time to keep memory peaks low. Desktop: in parallel.
-    if (profile.mobile) { for (const j of jobs) await j(); } else await Promise.all(jobs.map((j) => j()));
+    // Phones: one model at a time to keep memory peaks low. Desktop: in parallel.
+    if (profile.mobile) { for (const j of now) await j(); } else await Promise.all(now.map((j) => j()));
 
     await enterCall();
+    // Background: one at a time so the call stays smooth; progress shows in the call's status pill.
+    (async () => {
+      for (const j of later) await j().catch(() => {});
+      bgPill('');
+    })();
   } catch (e) {
     console.error(e);
     $('err').textContent = (e && e.message) || String(e);

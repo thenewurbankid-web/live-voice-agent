@@ -1,5 +1,5 @@
 // Ears: Silero VAD (global `vad`) + Whisper (transformers.js) composed together.
-const TRANSFORMERS = 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.5.1/+esm';
+const COMLINK = 'https://cdn.jsdelivr.net/npm/comlink@4.4.2/+esm';
 const VAD_BASE = 'https://cdn.jsdelivr.net/npm/@ricky0123/vad-web@0.0.31/dist/';
 const ORT_BASE = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/';
 
@@ -14,7 +14,8 @@ export class Ears {
   }
 
   async load(micStream, profile, onProgress = () => {}) {
-    const { pipeline } = await import(TRANSFORMERS);
+    const Comlink = await import(COMLINK);
+    this.worker = Comlink.wrap(new Worker(new URL('./ml-worker.js', import.meta.url), { type: 'module' }));
 
     const useGpu = !profile.mobile && profile.webgpu;
     const model = profile.asrModel || (useGpu ? 'onnx-community/whisper-base' : 'onnx-community/whisper-tiny');
@@ -32,7 +33,8 @@ export class Ears {
       onProgress(total ? loaded / total : 0, 'Loading ears');
     };
 
-    this.asr = await pipeline('automatic-speech-recognition', model, { ...opts, progress_callback });
+    await this.worker.loadAsr(model, opts, Comlink.proxy(progress_callback));
+    this.asr = true;
 
     this.vad = await vad.MicVAD.new({
       model: 'v5',
@@ -58,8 +60,7 @@ export class Ears {
 
   async transcribe(audio, { language = 'english', task = 'transcribe' } = {}) {
     if (!this.asr) return '';
-    const out = await this.asr(audio, { language, task });
-    const raw = (Array.isArray(out) ? out[0]?.text : out?.text) || '';
+    const raw = await this.worker.transcribe(audio, { language, task });
     const text = raw.trim();
     if (text.length < 2) return '';
     if (/^[\[(].*[\])]$/.test(text)) return ''; // [BLANK_AUDIO], (music), ...
